@@ -489,7 +489,7 @@ Diff stat:
 %s
 
 Final diff paths and statuses:
-%s%s%s`, branch, baseSHA, sctx.Run.HeadSHA, baseBranch, titleRules, scopeRules, diffStat, finalDiff, prDraftIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
+%s%s%s`, branch, baseSHA, sctx.Run.HeadSHA, baseBranch, titleRules, scopeRules, prPromptInventory(diffStat, "--stat", sctx.WorkDir, baseSHA, sctx.Run.HeadSHA), prPromptInventory(finalDiff, "--name-status", sctx.WorkDir, baseSHA, sctx.Run.HeadSHA), prDraftIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
 
 	prompt += prBodyBudgetPromptSection(bodyLimit)
 	prompt += agent.MemoryFilesRule
@@ -552,7 +552,7 @@ Rules:
 - Do not invent behavior.
 
 Final diff paths and statuses:
-%s%s%s`, branch, baseSHA, sctx.Run.HeadSHA, baseBranch, paths, prDraftIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
+%s%s%s`, branch, baseSHA, sctx.Run.HeadSHA, baseBranch, prPromptInventory(paths, "--name-status", sctx.WorkDir, baseSHA, sctx.Run.HeadSHA), prDraftIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
 	prompt += agent.MemoryFilesRule
 	result, err := sctx.RunAgentContext(sctx.Ctx, agent.RunOpts{
 		Prompt:     prompt,
@@ -572,6 +572,37 @@ Final diff paths and statuses:
 		return "", err
 	}
 	return title, nil
+}
+
+// prPromptInventory bounds redundant drafting context, never the diff used by
+// fallbackPRContent or Review's complete coverage checklist. Small inventories
+// retain their exact text. Oversized inventories sample both ends and name the
+// omitted count, with pinned commands that recover every line and the full patch.
+func prPromptInventory(raw, format, workDir, baseSHA, headSHA string) string {
+	const maxLines = 40
+	const maxBytes = 8 * 1024
+	lines := strings.Split(raw, "\n")
+	if len(raw) <= maxBytes {
+		return raw
+	}
+	var sample []string
+	size := 0
+	for i, line := range lines {
+		if len(lines) > maxLines && i >= maxLines/2 && i < len(lines)-maxLines/2 {
+			continue
+		}
+		if size+len(line)+1 > maxBytes {
+			continue
+		}
+		sample = append(sample, line)
+		size += len(line) + 1
+	}
+	// These recovery commands are explicitly POSIX-shell text. Single quotes
+	// keep paths and refs literal, including apostrophes, dollars and backticks.
+	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
+	dir, delta := quote(workDir), quote(baseSHA+".."+headSHA)
+	return fmt.Sprintf("%d inventory lines: %d shown, %d omitted for length. Samples from the beginning and end:\n%s\n\nRecover the complete inventory and full diff in a POSIX shell:\ngit -C %s diff %s %s --\ngit -C %s diff %s --",
+		len(lines), len(sample), len(lines)-len(sample), strings.Join(sample, "\n"), dir, format, delta, dir, delta)
 }
 
 func prTitlePromptRules(sctx *pipeline.StepContext) string {
