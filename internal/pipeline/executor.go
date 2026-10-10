@@ -373,7 +373,9 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 	}
 	e.initializeRunScopes(run.ID)
 
-	// Create step result records in DB
+	// Record every requested skip before any step can park. Recovery and
+	// revalidation already preserve skipped rows, so future skips must not
+	// depend on this executor's in-memory map surviving a daemon restart.
 	stepRecords := make(map[types.StepName]*db.StepResult)
 	for _, step := range e.steps {
 		sr, err := e.db.InsertStepResult(run.ID, step.Name())
@@ -381,6 +383,14 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 			return e.failRun(run, repo, fmt.Errorf("insert step result: %w", err))
 		}
 		stepRecords[step.Name()] = sr
+		if e.skips[step.Name()] {
+			if err := e.refuseSkippedPRWithClosingIssues(run, repo, step.Name(), sr.ID); err != nil {
+				return e.failRun(run, repo, err, ctx)
+			}
+			if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
+				return e.failRun(run, repo, fmt.Errorf("skip step %s: %w", step.Name(), err), ctx)
+			}
+		}
 	}
 
 	// Execute steps sequentially. A late repair may send the same run back
@@ -394,12 +404,6 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 
 		sr := stepRecords[step.Name()]
 		if e.skips[step.Name()] {
-			if err := e.refuseSkippedPRWithClosingIssues(run, repo, step.Name(), sr.ID); err != nil {
-				return e.failRun(run, repo, err, ctx)
-			}
-			if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
-				return e.failRun(run, repo, fmt.Errorf("skip step %s: %w", step.Name(), err), ctx)
-			}
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, step.Name(), string(types.StepStatusSkipped), "", "", nil)
 			continue
 		}
