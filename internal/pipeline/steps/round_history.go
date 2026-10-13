@@ -253,6 +253,24 @@ func renderBoundedRoundHistory(prefix string, blocks []string) string {
 					}
 				}
 			}
+			if !compacted {
+				for i := range lines {
+					if !lines[i].finding {
+						continue
+					}
+					var payload map[string]any
+					if json.Unmarshal([]byte(strings.TrimPrefix(lines[i].text, "  - ")), &payload) != nil {
+						continue
+					}
+					if len(payload) > 1 && payload["id"] != nil {
+						encoded, _ := json.Marshal(map[string]any{"id": payload["id"]})
+						lines[i].text = "  - " + string(encoded)
+						lines[i].truncated = true
+						compacted = true
+						break
+					}
+				}
+			}
 			if !compacted && !dropOldest(false) {
 				if len(lines) == 0 {
 					return prefix + note

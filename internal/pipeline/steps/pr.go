@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -458,15 +459,17 @@ func redactPRContent(content prContent) prContent {
 
 func (s *PRStep) draftPRContent(sctx *pipeline.StepContext, branch, baseBranch, baseSHA string, provider scm.Provider, bodyLimit int) (prContent, error) {
 	ctx := sctx.Ctx
-	diffStatFormat := "--stat"
-	diffStat, _ := git.Run(ctx, sctx.WorkDir, "diff", diffStatFormat, baseSHA+".."+sctx.Run.HeadSHA)
+	diffStat, _ := git.Run(ctx, sctx.WorkDir, "diff", "--stat", baseSHA+".."+sctx.Run.HeadSHA)
 	if len(diffStat) > maxPRPromptInventoryBytes {
-		diffStatFormat = "--stat=4096"
-		diffStat, _ = git.Run(ctx, sctx.WorkDir, "diff", diffStatFormat, baseSHA+".."+sctx.Run.HeadSHA)
+		diffStat, _ = git.Run(ctx, sctx.WorkDir, "diff", "--shortstat", baseSHA+".."+sctx.Run.HeadSHA)
 	}
 	finalDiff, err := git.Run(ctx, sctx.WorkDir, "diff", "--name-status", baseSHA+".."+sctx.Run.HeadSHA)
 	if err != nil {
 		return prContent{}, fmt.Errorf("read final branch diff: %w", err)
+	}
+	inventory, err := prPromptInventory(sctx, finalDiff, baseSHA)
+	if err != nil {
+		return prContent{}, err
 	}
 	pipelineMD, riskLine, testingMD := s.buildPipelineSection(sctx, provider)
 	if marker := extractPipelineAttestationMarker(pipelineMD); marker != "" &&
@@ -496,7 +499,7 @@ Diff stat:
 %s
 
 Final diff paths and statuses:
-%s%s%s`, branch, baseSHA, sctx.Run.HeadSHA, baseBranch, titleRules, scopeRules, prPromptInventory(diffStat, diffStatFormat, sctx.WorkDir, baseSHA, sctx.Run.HeadSHA), prPromptInventory(finalDiff, "--name-status", sctx.WorkDir, baseSHA, sctx.Run.HeadSHA), prDraftIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
+%s%s%s`, branch, baseSHA, sctx.Run.HeadSHA, baseBranch, titleRules, scopeRules, diffStat, inventory, prDraftIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
 
 	prompt += prBodyBudgetPromptSection(bodyLimit)
 	prompt += agent.MemoryFilesRule
@@ -544,6 +547,10 @@ func (s *PRStep) draftConfiguredPRTitle(sctx *pipeline.StepContext, branch, base
 	if err != nil {
 		return "", fmt.Errorf("read final branch diff for PR title: %w", err)
 	}
+	inventory, err := prPromptInventory(sctx, paths, baseSHA)
+	if err != nil {
+		return "", err
+	}
 	prompt := fmt.Sprintf(`Draft only the bare concise pull request title text for the full final branch delta.
 
 Context:
@@ -559,7 +566,7 @@ Rules:
 - Do not invent behavior.
 
 Final diff paths and statuses:
-%s%s%s`, branch, baseSHA, sctx.Run.HeadSHA, baseBranch, prPromptInventory(paths, "--name-status", sctx.WorkDir, baseSHA, sctx.Run.HeadSHA), prDraftIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
+%s%s%s`, branch, baseSHA, sctx.Run.HeadSHA, baseBranch, inventory, prDraftIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
 	prompt += agent.MemoryFilesRule
 	result, err := sctx.RunAgentContext(sctx.Ctx, agent.RunOpts{
 		Prompt:     prompt,
@@ -583,99 +590,102 @@ Final diff paths and statuses:
 
 const maxPRPromptInventoryBytes = 8 * 1024
 
-func prPromptInventory(raw, format, workDir, baseSHA, headSHA string) string {
-	const maxBytes = maxPRPromptInventoryBytes
-	if len(raw) <= maxBytes {
-		return raw
+func prPromptInventory(sctx *pipeline.StepContext, raw, baseSHA string) (string, error) {
+	if len(raw) <= maxPRPromptInventoryBytes {
+		return raw, nil
 	}
 	type inventoryLine struct {
 		text   string
+		name   string
 		anchor bool
 	}
 	type inventoryGroup struct {
-		name  string
-		lines []inventoryLine
-		shown int
+		name        string
+		lines       []inventoryLine
+		directories map[string]bool
+		shown       int
 	}
 	var groups []*inventoryGroup
 	byName := map[string]*inventoryGroup{}
 	statuses := map[string]int{}
-	var totals []string
+	var names []string
 	for _, line := range strings.Split(raw, "\n") {
-		var name string
-		anchor := strings.Contains(line, "=>")
-		if format == "--name-status" {
-			fields := strings.Split(line, "\t")
-			if len(fields) < 2 {
-				totals = append(totals, line)
-				continue
+		fields := strings.Split(line, "\t")
+		entry := inventoryLine{text: line, anchor: true}
+		if len(fields) >= 2 && fields[0] != "" {
+			entry.name = fields[1]
+			if unquoted, err := strconv.Unquote(entry.name); err == nil {
+				entry.name = unquoted
 			}
-			name = fields[1]
-			status := fields[0]
-			if status == "" {
-				totals = append(totals, line)
-				continue
-			}
-			anchor = len(fields) > 2 || status == "D"
-			statuses[status[:1]]++
-		} else {
-			before, _, ok := strings.Cut(line, " | ")
-			if !ok {
-				totals = append(totals, line)
-				continue
-			}
-			name = strings.TrimSpace(before)
+			entry.anchor = len(fields) > 2 || fields[0] != "A" && fields[0] != "M"
+			statuses[fields[0][:1]]++
+			names = append(names, entry.name)
 		}
-		if unquoted, err := strconv.Unquote(name); err == nil {
-			name = unquoted
-		}
-		directory := path.Dir(name)
-		group := byName[directory]
+		directory := path.Dir(entry.name)
+		root := strings.Split(directory, "/")[0]
+		group := byName[root]
 		if group == nil {
-			group = &inventoryGroup{name: directory}
-			byName[directory] = group
+			group = &inventoryGroup{name: root, directories: map[string]bool{}}
+			byName[root] = group
 			groups = append(groups, group)
 		}
-		ext := path.Ext(name)
-		anchor = anchor || ext == ".go" || ext == ".rs" || ext == ".py" || ext == ".swift" || ext == ".java"
-		group.lines = append(group.lines, inventoryLine{text: line, anchor: anchor})
+		group.directories[directory] = true
+		group.lines = append(group.lines, entry)
 	}
+	attributes, err := git.RunWithInput(sctx.Ctx, sctx.WorkDir, strings.Join(names, "\x00")+"\x00",
+		"-c", "core.attributesFile=", "check-attr", "--source="+sctx.Run.HeadSHA, "-z", "--stdin", "linguist-generated")
+	if err != nil {
+		return "", fmt.Errorf("read pinned generation attributes for PR inventory: %w", err)
+	}
+	generated := map[string]bool{}
+	fields := strings.Split(attributes, "\x00")
+	for i := 0; i+2 < len(fields); i += 3 {
+		if fields[i+2] == "set" || fields[i+2] == "true" {
+			generated[fields[i]] = true
+		}
+	}
+	sort.Slice(groups, func(i, j int) bool { return groups[i].name < groups[j].name })
 	var sample []string
-	sampledBytes := 0
-	sampledLines := 0
-	omitted := 0
+	var candidates []inventoryLine
 	for _, group := range groups {
-		root := strings.Split(group.name, "/")[0]
-		outputGroup := root == "assets" || root == "public" || root == "generated" || root == "dist" || root == "build"
+		groupCandidates := 0
 		for _, entry := range group.lines {
-			line, anchor := entry.text, entry.anchor
-			if !outputGroup || anchor || ((len(group.lines) <= 20 || group.shown < 2) && sampledLines < 40 && sampledBytes+len(line)+1 <= maxBytes) {
-				sample = append(sample, line)
+			if entry.anchor || !generated[entry.name] {
+				sample = append(sample, entry.text)
 				group.shown++
-				if outputGroup && !anchor {
-					sampledBytes += len(line) + 1
-					sampledLines++
-				}
-			} else {
-				omitted++
+			} else if len(candidates) < 40 && groupCandidates < 2 {
+				candidates = append(candidates, entry)
+				groupCandidates++
 			}
 		}
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "%d inventory lines: %d shown, %d omitted for length. Directory counts:\n", len(strings.Split(raw, "\n")), len(sample)+len(totals), omitted)
-	for _, group := range groups {
-		fmt.Fprintf(&b, "- %q: %d changed, %d shown, %d omitted\n", group.name, len(group.lines), group.shown, len(group.lines)-group.shown)
-	}
-	if format == "--name-status" {
-		fmt.Fprintf(&b, "Change totals: A=%d M=%d D=%d R=%d C=%d T=%d U=%d\n", statuses["A"], statuses["M"], statuses["D"], statuses["R"], statuses["C"], statuses["T"], statuses["U"])
-	}
-	b.WriteString(strings.Join(totals, "\n"))
-	b.WriteString("\nSource/status/rename anchors and directory samples:\n")
-	b.WriteString(strings.Join(sample, "\n"))
 	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
-	dir, delta := quote(workDir), quote(baseSHA+".."+headSHA)
-	fmt.Fprintf(&b, "\n\nRecover the complete inventory and full diff in a POSIX shell:\ngit -C %s diff %s %s --\ngit -C %s diff %s --", dir, format, delta, dir, delta)
-	return b.String()
+	render := func() string {
+		var b strings.Builder
+		fmt.Fprintf(&b, "%d inventory lines: %d shown, %d omitted for length. Directory counts (top-level groups):\n", len(strings.Split(raw, "\n")), len(sample), len(strings.Split(raw, "\n"))-len(sample))
+		for _, group := range groups {
+			fmt.Fprintf(&b, "- %q: %d changed, %d shown, %d omitted across %d directories\n", group.name, len(group.lines), group.shown, len(group.lines)-group.shown, len(group.directories))
+		}
+		fmt.Fprintf(&b, "Change totals: A=%d M=%d D=%d R=%d C=%d T=%d U=%d\n", statuses["A"], statuses["M"], statuses["D"], statuses["R"], statuses["C"], statuses["T"], statuses["U"])
+		b.WriteString("Only files declared linguist-generated at the target commit are omitted.\nSource/status/rename anchors and generated samples:\n")
+		b.WriteString(strings.Join(sample, "\n"))
+		dir, delta := quote(sctx.WorkDir), quote(baseSHA+".."+sctx.Run.HeadSHA)
+		fmt.Fprintf(&b, "\n\nRecover the complete inventory and full diff in a POSIX shell:\ngit -C %s diff --name-status %s --\ngit -C %s diff %s --", dir, delta, dir, delta)
+		return b.String()
+	}
+	if len(render()) > maxPRPromptInventoryBytes {
+		return "", fmt.Errorf("authored PR inventory and directory counts exceed %d-byte prompt bound", maxPRPromptInventoryBytes)
+	}
+	for _, candidate := range candidates {
+		group := byName[strings.Split(path.Dir(candidate.name), "/")[0]]
+		sample = append(sample, candidate.text)
+		group.shown++
+		if len(render()) > maxPRPromptInventoryBytes {
+			sample = sample[:len(sample)-1]
+			group.shown--
+		}
+	}
+	return render(), nil
 }
 
 func prTitlePromptRules(sctx *pipeline.StepContext) string {
