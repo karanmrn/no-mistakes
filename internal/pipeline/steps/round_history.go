@@ -147,10 +147,10 @@ func branchEarlierFixes(entries []*db.BranchDecisionRound, database *db.DB) map[
 	return earlier
 }
 
-// renderBoundedRoundHistory keeps the detailed current-step channel under the
-// same prompt budget as the compact cross-step decision channels. Findings are
-// ordered chronologically, so when space is exhausted it retains the newest
-// lines and explicitly discloses what was omitted.
+// renderBoundedRoundHistory bounds current-step and uncertified prior-run
+// metadata. It reduces fix summaries and finding text before dropping older
+// finding lines, preserving the warning prefix and disclosing omissions.
+// Prompt omissions never resolve the executor's outstanding finding set.
 func renderBoundedRoundHistory(prefix string, blocks []string) string {
 	if len(prefix) >= maxDecisionSectionBytes {
 		return prefix[:maxDecisionSectionBytes]
