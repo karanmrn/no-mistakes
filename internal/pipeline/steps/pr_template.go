@@ -104,10 +104,7 @@ func (s *PRStep) draftTemplateNarrative(sctx *pipeline.StepContext, branch, base
 	if err != nil {
 		return prContent{}, fmt.Errorf("read final branch diff: %w", err)
 	}
-	inventory, err := prPromptInventory(sctx, paths, baseSHA)
-	if err != nil {
-		return prContent{}, err
-	}
+	inventory := prPromptInventory(sctx, paths, baseSHA)
 	// JSON quoting delimits the trusted template without inventing a template
 	// language. It supplies prose instructions/structure, never recorded facts.
 	quoted, _ := json.Marshal(template)

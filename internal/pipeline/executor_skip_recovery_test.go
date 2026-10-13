@@ -94,6 +94,9 @@ func TestExecutorSkipRecoveryProcess(t *testing.T) {
 			os.Exit(0)
 		}
 	})
+	if os.Getenv("NM_SKIP_FIXTURE_SKIPS") == "push" {
+		executor.SetSkippedSteps([]types.StepName{types.StepPush})
+	}
 	if os.Getenv("NM_SKIP_FIXTURE_SKIPS") == "true" {
 		executor.SetSkippedSteps([]types.StepName{types.StepRebase, types.StepPush, types.StepPR, types.StepCI})
 	}
@@ -216,5 +219,133 @@ func TestExecutor_RequestedSkipsSurviveParkAndRecovery(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func TestExecutor_SkipRemainingPreservesRequestedSkipsAfterRecovery(t *testing.T) {
+	for _, gate := range []types.StepName{types.StepRebase, types.StepIntent} {
+		t.Run(string(gate), func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			workDir := filepath.Join(p.Root(), "checkout")
+			if err := os.Mkdir(workDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			initGitRepo(t, workDir)
+			head, err := git.HeadSHA(context.Background(), workDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunHeadSHA(run.ID, head); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.Close(); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestExecutorSkipRecoveryProcess$")
+			cmd.Env = append(os.Environ(), "NM_SKIP_FIXTURE_ROOT="+p.Root(), "NM_SKIP_FIXTURE_RUN="+run.ID, "NM_SKIP_FIXTURE_GATE="+string(gate), "NM_SKIP_FIXTURE_SKIPS=push")
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("parked process: %v\n%s", err, out)
+			}
+			database, err = db.Open(p.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			run, err = database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := database.GetStepsByRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var skippedPush *db.StepResult
+			for _, result := range before {
+				if result.StepName == types.StepPush {
+					skippedPush = result
+				}
+			}
+			if skippedPush == nil || skippedPush.Status != types.StepStatusSkipped {
+				t.Fatal("requested push skip was not durable before recovery")
+			}
+			control, err := sql.Open("sqlite", p.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer control.Close()
+			if _, err := control.Exec(`CREATE TRIGGER deny_reskip BEFORE UPDATE OF status ON step_results
+				WHEN OLD.status = 'skipped' BEGIN SELECT RAISE(FAIL, 'existing skip rewritten'); END`); err != nil {
+				t.Fatal(err)
+			}
+			steps := skipRecoverySteps(t, filepath.Join(p.Root(), "calls"), "")
+			for _, step := range steps {
+				if step.Name() == types.StepRebase {
+					rebase := step.(*adaptiveCallStep)
+					original := rebase.fn
+					rebase.fn = func(sctx *StepContext) (*StepOutcome, error) {
+						outcome, err := original(sctx)
+						if err == nil {
+							outcome.SkipRemaining = true
+						}
+						return outcome, err
+					}
+				}
+			}
+			executor := NewExecutor(database, p, nil, nil, steps, nil)
+			if err := ValidateRecoveredRun(database, run, steps); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() { done <- executor.Resume(ctx, run, repo, workDir) }()
+			action := types.ActionApprove
+			if gate == types.StepRebase {
+				action = types.ActionFix
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				if err := executor.Respond(gate, action, nil); err == nil {
+					break
+				} else if time.Now().After(deadline) {
+					cancel()
+					waitExecutorDone(t, done)
+					t.Fatalf("recovered gate refused %s: %v", action, err)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			waitExecutorDone(t, done)
+			calls, err := os.ReadFile(filepath.Join(p.Root(), "calls"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "intent\nrebase\n"
+			if gate == types.StepRebase {
+				want += "rebase\n"
+			}
+			if string(calls) != want {
+				t.Fatalf("executed steps = %q, want %q", calls, want)
+			}
+			results, err := database.GetStepsByRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, result := range results {
+				wantStatus := types.StepStatusSkipped
+				if result.StepName == types.StepIntent || result.StepName == types.StepRebase {
+					wantStatus = types.StepStatusCompleted
+				}
+				if result.Status != wantStatus {
+					t.Errorf("%s status = %s, want %s", result.StepName, result.Status, wantStatus)
+				}
+				if result.StepName == types.StepPush && (result.ID != skippedPush.ID || result.CompletedAt == nil || skippedPush.CompletedAt == nil || *result.CompletedAt != *skippedPush.CompletedAt) {
+					t.Error("recovery rewrote the existing push skip")
+				}
+			}
+			completed, err := database.GetRun(run.ID)
+			if err != nil || completed.Status != types.RunCompleted {
+				t.Fatalf("completed run = %+v, error = %v", completed, err)
+			}
+		})
 	}
 }

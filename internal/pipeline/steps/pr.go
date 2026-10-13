@@ -467,10 +467,7 @@ func (s *PRStep) draftPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 	if err != nil {
 		return prContent{}, fmt.Errorf("read final branch diff: %w", err)
 	}
-	inventory, err := prPromptInventory(sctx, finalDiff, baseSHA)
-	if err != nil {
-		return prContent{}, err
-	}
+	inventory := prPromptInventory(sctx, finalDiff, baseSHA)
 	pipelineMD, riskLine, testingMD := s.buildPipelineSection(sctx, provider)
 	if marker := extractPipelineAttestationMarker(pipelineMD); marker != "" &&
 		((bodyLimit > 0 && scm.PRBodyLen(marker) > bodyLimit) || len(marker) > maxPullRequestBodyBytes) {
@@ -547,10 +544,7 @@ func (s *PRStep) draftConfiguredPRTitle(sctx *pipeline.StepContext, branch, base
 	if err != nil {
 		return "", fmt.Errorf("read final branch diff for PR title: %w", err)
 	}
-	inventory, err := prPromptInventory(sctx, paths, baseSHA)
-	if err != nil {
-		return "", err
-	}
+	inventory := prPromptInventory(sctx, paths, baseSHA)
 	prompt := fmt.Sprintf(`Draft only the bare concise pull request title text for the full final branch delta.
 
 Context:
@@ -590,13 +584,12 @@ Final diff paths and statuses:
 
 const maxPRPromptInventoryBytes = 8 * 1024
 
-func prPromptInventory(sctx *pipeline.StepContext, raw, baseSHA string) (string, error) {
+func prPromptInventory(sctx *pipeline.StepContext, raw, baseSHA string) string {
 	if len(raw) <= maxPRPromptInventoryBytes {
-		return raw, nil
+		return raw
 	}
 	type inventoryLine struct {
 		text   string
-		name   string
 		anchor bool
 	}
 	type inventoryGroup struct {
@@ -604,24 +597,26 @@ func prPromptInventory(sctx *pipeline.StepContext, raw, baseSHA string) (string,
 		lines       []inventoryLine
 		directories map[string]bool
 		shown       int
+		listed      bool
+		anchor      bool
 	}
 	var groups []*inventoryGroup
 	byName := map[string]*inventoryGroup{}
 	statuses := map[string]int{}
-	var names []string
-	for _, line := range strings.Split(raw, "\n") {
+	lines := strings.Split(strings.TrimSuffix(raw, "\n"), "\n")
+	for _, line := range lines {
 		fields := strings.Split(line, "\t")
 		entry := inventoryLine{text: line, anchor: true}
+		name := ""
 		if len(fields) >= 2 && fields[0] != "" {
-			entry.name = fields[1]
-			if unquoted, err := strconv.Unquote(entry.name); err == nil {
-				entry.name = unquoted
+			name = fields[len(fields)-1]
+			if unquoted, err := strconv.Unquote(name); err == nil {
+				name = unquoted
 			}
-			entry.anchor = len(fields) > 2 || fields[0] != "A" && fields[0] != "M"
+			entry.anchor = fields[0] != "A" || len(fields) > 2
 			statuses[fields[0][:1]]++
-			names = append(names, entry.name)
 		}
-		directory := path.Dir(entry.name)
+		directory := path.Dir(name)
 		root := strings.Split(directory, "/")[0]
 		group := byName[root]
 		if group == nil {
@@ -629,63 +624,75 @@ func prPromptInventory(sctx *pipeline.StepContext, raw, baseSHA string) (string,
 			byName[root] = group
 			groups = append(groups, group)
 		}
+		group.anchor = group.anchor || entry.anchor
 		group.directories[directory] = true
 		group.lines = append(group.lines, entry)
 	}
-	attributes, err := git.RunWithInput(sctx.Ctx, sctx.WorkDir, strings.Join(names, "\x00")+"\x00",
-		"-c", "core.attributesFile=", "check-attr", "--source="+sctx.Run.HeadSHA, "-z", "--stdin", "linguist-generated")
-	if err != nil {
-		return "", fmt.Errorf("read pinned generation attributes for PR inventory: %w", err)
-	}
-	generated := map[string]bool{}
-	fields := strings.Split(attributes, "\x00")
-	for i := 0; i+2 < len(fields); i += 3 {
-		if fields[i+2] == "set" || fields[i+2] == "true" {
-			generated[fields[i]] = true
+	sort.Slice(groups, func(i, j int) bool {
+		if groups[i].anchor != groups[j].anchor {
+			return groups[i].anchor
 		}
-	}
-	sort.Slice(groups, func(i, j int) bool { return groups[i].name < groups[j].name })
+		return groups[i].name < groups[j].name
+	})
 	var sample []string
-	var candidates []inventoryLine
-	for _, group := range groups {
-		groupCandidates := 0
-		for _, entry := range group.lines {
-			if entry.anchor || !generated[entry.name] {
-				sample = append(sample, entry.text)
-				group.shown++
-			} else if len(candidates) < 40 && groupCandidates < 2 {
-				candidates = append(candidates, entry)
-				groupCandidates++
-			}
-		}
-	}
 	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
 	render := func() string {
 		var b strings.Builder
-		fmt.Fprintf(&b, "%d inventory lines: %d shown, %d omitted for length. Directory counts (top-level groups):\n", len(strings.Split(raw, "\n")), len(sample), len(strings.Split(raw, "\n"))-len(sample))
+		listed, omittedEntries, omittedDirectories := 0, 0, 0
 		for _, group := range groups {
-			fmt.Fprintf(&b, "- %q: %d changed, %d shown, %d omitted across %d directories\n", group.name, len(group.lines), group.shown, len(group.lines)-group.shown, len(group.directories))
+			if group.listed {
+				listed++
+			} else {
+				omittedEntries += len(group.lines)
+				omittedDirectories += len(group.directories)
+			}
 		}
+		fmt.Fprintf(&b, "%d inventory lines: %d shown, %d omitted for length. Directory counts (top-level groups): %d total, %d listed, %d omitted.\n", len(lines), len(sample), len(lines)-len(sample), len(groups), listed, len(groups)-listed)
+		for _, group := range groups {
+			if group.listed {
+				fmt.Fprintf(&b, "- %q: %d changed, %d shown, %d omitted across %d directories\n", group.name, len(group.lines), group.shown, len(group.lines)-group.shown, len(group.directories))
+			}
+		}
+		fmt.Fprintf(&b, "Unlisted groups contain %d changed entries across %d directories. Recover their full names and statuses with the commands below.\n", omittedEntries, omittedDirectories)
 		fmt.Fprintf(&b, "Change totals: A=%d M=%d D=%d R=%d C=%d T=%d U=%d\n", statuses["A"], statuses["M"], statuses["D"], statuses["R"], statuses["C"], statuses["T"], statuses["U"])
-		b.WriteString("Only files declared linguist-generated at the target commit are omitted.\nSource/status/rename anchors and generated samples:\n")
+		b.WriteString("This summary omits entries only for length and does not classify them as generated. Inspect the complete delta before drafting when the summary is insufficient.\nStatus/rename, modified-file and sparse-group anchors, then bounded samples:\n")
 		b.WriteString(strings.Join(sample, "\n"))
 		dir, delta := quote(sctx.WorkDir), quote(baseSHA+".."+sctx.Run.HeadSHA)
 		fmt.Fprintf(&b, "\n\nRecover the complete inventory and full diff in a POSIX shell:\ngit -C %s diff --name-status %s --\ngit -C %s diff %s --", dir, delta, dir, delta)
 		return b.String()
 	}
-	if len(render()) > maxPRPromptInventoryBytes {
-		return "", fmt.Errorf("authored PR inventory and directory counts exceed %d-byte prompt bound", maxPRPromptInventoryBytes)
-	}
-	for _, candidate := range candidates {
-		group := byName[strings.Split(path.Dir(candidate.name), "/")[0]]
-		sample = append(sample, candidate.text)
-		group.shown++
-		if len(render()) > maxPRPromptInventoryBytes {
-			sample = sample[:len(sample)-1]
-			group.shown--
+	metadataBytes := 0
+	for _, group := range groups {
+		rowBytes := len(fmt.Sprintf("- %q: %d changed, %d shown, %d omitted across %d directories\n", group.name, len(group.lines), len(group.lines), len(group.lines), len(group.directories)))
+		if metadataBytes+rowBytes <= 2048 {
+			group.listed = true
+			metadataBytes += rowBytes
 		}
 	}
-	return render(), nil
+	for _, anchors := range []bool{true, false} {
+		samples := 0
+		for _, group := range groups {
+			groupSamples := 0
+			for _, entry := range group.lines {
+				if (entry.anchor || len(group.lines) <= 2) != anchors {
+					continue
+				}
+				if !anchors && (samples >= 40 || groupSamples >= 2) {
+					continue
+				}
+				sample = append(sample, entry.text)
+				group.shown++
+				if len(render()) > maxPRPromptInventoryBytes {
+					sample = sample[:len(sample)-1]
+					group.shown--
+				} else {
+					samples++
+					groupSamples++
+				}
+			}
+		}
+	}
+	return render()
 }
 
 func prTitlePromptRules(sctx *pipeline.StepContext) string {
