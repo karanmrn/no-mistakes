@@ -3,9 +3,13 @@
 package shellenv
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -151,7 +155,37 @@ func ShellCommandGroupActive(cmd *exec.Cmd) (bool, error) {
 	if errors.Is(err, syscall.ESRCH) {
 		return false, nil
 	}
-	return err == nil, err
+	if err != nil && !errors.Is(err, syscall.EPERM) {
+		return false, err
+	}
+	// A zombie still occupies its process group but has finished execution.
+	// Linux's signal probe succeeds for it; macOS can return EPERM instead.
+	// Inspect states with the same portable ps fields used by procreap.
+	ctx, cancel := context.WithTimeout(context.Background(), defaultWaitDelay)
+	defer cancel()
+	probe := exec.CommandContext(ctx, "ps", "-eo", "pgid=,stat=")
+	ConfigureShellCommand(probe)
+	out, err := OutputShellCommand(probe)
+	if err != nil {
+		return false, fmt.Errorf("inspect process group states: %w", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if len(fields) != 2 {
+			return false, fmt.Errorf("invalid process group state: %q", line)
+		}
+		pgid, err := strconv.Atoi(fields[0])
+		if err != nil {
+			return false, fmt.Errorf("parse process group: %w", err)
+		}
+		if pgid == cmd.Process.Pid && !strings.HasPrefix(fields[1], "Z") {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // groupGoneWithin reports whether the process group emptied out before the

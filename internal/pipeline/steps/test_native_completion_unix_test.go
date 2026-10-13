@@ -10,14 +10,17 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
 
 func TestTestNativeEarlyResultChildCompletion(t *testing.T) {
-	for _, mode := range []string{"early-exit", "early-exit-redirected", "early-repair", "success", "failure", "deadline"} {
+	for _, mode := range []string{"early-exit", "early-exit-redirected", "early-repair", "success", "zombie-success", "failure", "deadline"} {
 		t.Run(mode, func(t *testing.T) {
 			dir, base, head := setupGitRepo(t)
 			controls := t.TempDir()
@@ -31,7 +34,7 @@ func TestTestNativeEarlyResultChildCompletion(t *testing.T) {
 			if mode == "failure" {
 				code = 7
 			}
-			script := "#!/bin/sh\ncat > " + quote(recording) + "\ntrap " + quote("printf cancelled > "+quote(cancelled)+"; exit 143") + " TERM\n(while [ ! -e " + quote(release) + " ]; do sleep 0.02; done; printf '%s' completed > " + quote(completed) + fmt.Sprintf("; exit %d) &\nchild=$!\nprintf '%%s\\n' ", code) + quote(payload) + "\nprintf '%s' ready > " + quote(ready) + "\n"
+			script := "#!/bin/sh\ncat > " + quote(recording) + "\ntrap " + quote("printf cancelled > "+quote(cancelled)+"; exit 143") + " TERM\n(while [ ! -e " + quote(release) + " ]; do sleep 0.02; done; printf '%s' completed > " + quote(completed) + fmt.Sprintf("; exit %d) &\nchild=$!\nprintf '%%s\\n' ", code) + quote(payload) + "\nprintf '%s' \"$$\" > " + quote(ready) + "\n"
 			early := strings.HasPrefix(mode, "early-")
 			if mode == "early-exit-redirected" {
 				script = strings.Replace(script, ") &\nchild=$!", ") >/dev/null 2>&1 &\nchild=$!", 1)
@@ -72,7 +75,7 @@ func TestTestNativeEarlyResultChildCompletion(t *testing.T) {
 			limit := time.NewTimer(5 * time.Second)
 			defer limit.Stop()
 			for {
-				if _, err := os.Stat(ready); err == nil {
+				if data, err := os.ReadFile(ready); err == nil && len(data) > 0 {
 					break
 				}
 				select {
@@ -81,6 +84,38 @@ func TestTestNativeEarlyResultChildCompletion(t *testing.T) {
 				case <-limit.C:
 					t.Fatal("child readiness deadline")
 				case <-time.After(10 * time.Millisecond):
+				}
+			}
+			if mode == "zombie-success" {
+				pid, err := os.ReadFile(ready)
+				if err != nil {
+					t.Fatal(err)
+				}
+				pgid, err := strconv.Atoi(string(pid))
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Keep an exited group member unreaped while the real native Test
+				// adapter consumes success and waits for its required live child.
+				zombie := exec.Command("/bin/sh", "-c", "exit 0")
+				zombie.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: pgid}
+				if err := zombie.Start(); err != nil {
+					t.Fatal(err)
+				}
+				defer zombie.Wait()
+				deadline := time.Now().Add(2 * time.Second)
+				for {
+					out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(zombie.Process.Pid)).Output()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if strings.HasPrefix(strings.TrimSpace(string(out)), "Z") {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatal("child did not become a zombie")
+					}
+					time.Sleep(10 * time.Millisecond)
 				}
 			}
 			if mode != "deadline" && !early {
@@ -131,7 +166,7 @@ func TestTestNativeEarlyResultChildCompletion(t *testing.T) {
 				if _, err := os.Stat(completed); err == nil {
 					t.Fatal("required child completed before the refusal")
 				}
-			case "success":
+			case "success", "zombie-success":
 				if got.err != nil || got.outcome == nil || got.outcome.NeedsApproval {
 					t.Fatalf("delayed successful child did not pass: %#v %v", got.outcome, got.err)
 				}

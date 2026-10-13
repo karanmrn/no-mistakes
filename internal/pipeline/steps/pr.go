@@ -634,41 +634,34 @@ func prPromptInventory(sctx *pipeline.StepContext, raw, baseSHA string) string {
 		}
 		return groups[i].name < groups[j].name
 	})
-	var sample []string
 	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
-	render := func() string {
-		var b strings.Builder
-		listed, omittedEntries, omittedDirectories := 0, 0, 0
-		for _, group := range groups {
-			if group.listed {
-				listed++
-			} else {
-				omittedEntries += len(group.lines)
-				omittedDirectories += len(group.directories)
-			}
-		}
-		fmt.Fprintf(&b, "%d inventory lines: %d shown, %d omitted for length. Directory counts (top-level groups): %d total, %d listed, %d omitted.\n", len(lines), len(sample), len(lines)-len(sample), len(groups), listed, len(groups)-listed)
-		for _, group := range groups {
-			if group.listed {
-				fmt.Fprintf(&b, "- %q: %d changed, %d shown, %d omitted across %d directories\n", group.name, len(group.lines), group.shown, len(group.lines)-group.shown, len(group.directories))
-			}
-		}
-		fmt.Fprintf(&b, "Unlisted groups contain %d changed entries across %d directories. Recover their full names and statuses with the commands below.\n", omittedEntries, omittedDirectories)
-		fmt.Fprintf(&b, "Change totals: A=%d M=%d D=%d R=%d C=%d T=%d U=%d\n", statuses["A"], statuses["M"], statuses["D"], statuses["R"], statuses["C"], statuses["T"], statuses["U"])
-		b.WriteString("This summary omits entries only for length and does not classify them as generated. Inspect the complete delta before drafting when the summary is insufficient.\nStatus/rename, modified-file and sparse-group anchors, then bounded samples:\n")
-		b.WriteString(strings.Join(sample, "\n"))
-		dir, delta := quote(sctx.WorkDir), quote(baseSHA+".."+sctx.Run.HeadSHA)
-		fmt.Fprintf(&b, "\n\nRecover the complete inventory and full diff in a POSIX shell:\ngit -C %s diff --name-status %s --\ngit -C %s diff %s --", dir, delta, dir, delta)
-		return b.String()
-	}
-	metadataBytes := 0
+	const headerFormat = "%d inventory lines: %d shown, %d omitted for length. Directory counts (top-level groups): %d total, %d listed, %d omitted.\n"
+	const groupFormat = "- %q: %d changed, %d shown, %d omitted across %d directories\n"
+	metadataBytes, rowBytes, listed, omittedEntries, omittedDirectories := 0, 0, 0, 0, 0
 	for _, group := range groups {
-		rowBytes := len(fmt.Sprintf("- %q: %d changed, %d shown, %d omitted across %d directories\n", group.name, len(group.lines), len(group.lines), len(group.lines), len(group.directories)))
-		if metadataBytes+rowBytes <= 2048 {
+		maxRowBytes := len(fmt.Sprintf(groupFormat, group.name, len(group.lines), len(group.lines), len(group.lines), len(group.directories)))
+		if metadataBytes+maxRowBytes <= 2048 {
 			group.listed = true
-			metadataBytes += rowBytes
+			metadataBytes += maxRowBytes
+			rowBytes += len(fmt.Sprintf(groupFormat, group.name, len(group.lines), 0, len(group.lines), len(group.directories)))
+			listed++
+		} else {
+			omittedEntries += len(group.lines)
+			omittedDirectories += len(group.directories)
 		}
 	}
+	metadata := fmt.Sprintf("Unlisted groups contain %d changed entries across %d directories. Recover their full names and statuses with the commands below.\n", omittedEntries, omittedDirectories)
+	metadata += fmt.Sprintf("Change totals: A=%d M=%d D=%d R=%d C=%d T=%d U=%d\n", statuses["A"], statuses["M"], statuses["D"], statuses["R"], statuses["C"], statuses["T"], statuses["U"])
+	metadata += "This summary omits entries only for length and does not classify them as generated. Inspect the complete delta before drafting when the summary is insufficient.\nStatus/rename, modified-file and sparse-group anchors, then bounded samples:\n"
+	dir, delta := quote(sctx.WorkDir), quote(baseSHA+".."+sctx.Run.HeadSHA)
+	recovery := fmt.Sprintf("\n\nRecover the complete inventory and full diff in a POSIX shell:\ngit -C %s diff --name-status %s --\ngit -C %s diff %s --", dir, delta, dir, delta)
+	inventoryBytes := len(fmt.Sprintf(headerFormat, len(lines), 0, len(lines), len(groups), listed, len(groups)-listed)) + rowBytes + len(metadata) + len(recovery)
+	// Only these decimal counts and the sample grow during selection. Account
+	// for digit boundaries exactly, without rendering the whole inventory.
+	countBytes := func(shown, total int) int {
+		return len(strconv.Itoa(shown)) + len(strconv.Itoa(total-shown))
+	}
+	var sample []string
 	for _, anchors := range []bool{true, false} {
 		samples := 0
 		for _, group := range groups {
@@ -680,19 +673,36 @@ func prPromptInventory(sctx *pipeline.StepContext, raw, baseSHA string) string {
 				if !anchors && (samples >= 40 || groupSamples >= 2) {
 					continue
 				}
+				addedBytes := len(entry.text) + countBytes(len(sample)+1, len(lines)) - countBytes(len(sample), len(lines))
+				if len(sample) > 0 {
+					addedBytes++ // separator between sample lines
+				}
+				if group.listed {
+					addedBytes += countBytes(group.shown+1, len(group.lines)) - countBytes(group.shown, len(group.lines))
+				}
+				if inventoryBytes+addedBytes > maxPRPromptInventoryBytes {
+					continue
+				}
 				sample = append(sample, entry.text)
 				group.shown++
-				if len(render()) > maxPRPromptInventoryBytes {
-					sample = sample[:len(sample)-1]
-					group.shown--
-				} else {
-					samples++
-					groupSamples++
-				}
+				inventoryBytes += addedBytes
+				samples++
+				groupSamples++
 			}
 		}
 	}
-	return render()
+	var b strings.Builder
+	b.Grow(inventoryBytes)
+	fmt.Fprintf(&b, headerFormat, len(lines), len(sample), len(lines)-len(sample), len(groups), listed, len(groups)-listed)
+	for _, group := range groups {
+		if group.listed {
+			fmt.Fprintf(&b, groupFormat, group.name, len(group.lines), group.shown, len(group.lines)-group.shown, len(group.directories))
+		}
+	}
+	b.WriteString(metadata)
+	b.WriteString(strings.Join(sample, "\n"))
+	b.WriteString(recovery)
+	return b.String()
 }
 
 func prTitlePromptRules(sctx *pipeline.StepContext) string {
