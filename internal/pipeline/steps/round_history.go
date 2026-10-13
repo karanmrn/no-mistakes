@@ -165,6 +165,9 @@ func renderBoundedRoundHistory(prefix string, blocks []string) string {
 	lines := make([]historyLine, 0, len(rawLines))
 	for _, line := range rawLines {
 		text, truncated := truncateDecisionLine(line)
+		if strings.HasPrefix(line, "  - ") {
+			text, truncated = line, false
+		}
 		lines = append(lines, historyLine{
 			boundedDecisionLine: boundedDecisionLine{text: text, truncated: truncated},
 			finding:             strings.HasPrefix(line, "  - "),
@@ -172,28 +175,43 @@ func renderBoundedRoundHistory(prefix string, blocks []string) string {
 	}
 
 	dropped := 0
-	findingCount := 0
-	for _, line := range lines {
-		if line.finding {
-			findingCount++
+	if len(prefix)+len(joined) > maxDecisionSectionBytes {
+		seen := map[string]bool{}
+		for i := len(lines) - 1; i >= 0; i-- {
+			original := rawLines[i]
+			if strings.HasPrefix(original, "fix_summary: ") {
+				if len(lines[i].text) > 256 {
+					lines[i].text = boundedHistoryText(lines[i].text, 256)
+					lines[i].truncated = true
+				}
+			} else if lines[i].finding {
+				var payload map[string]any
+				if json.Unmarshal([]byte(strings.TrimPrefix(original, "  - ")), &payload) == nil {
+					key := original
+					if seen[key] {
+						delete(payload, "description")
+						encoded, _ := json.Marshal(payload)
+						lines[i].text = "  - " + string(encoded)
+						lines[i].truncated = true
+					}
+					seen[key] = true
+				}
+			}
 		}
 	}
-	dropOldest := func(findingsOnly bool) bool {
+	dropOldest := func(summariesOnly bool) bool {
 		for i, line := range lines {
-			if findingsOnly && !line.finding {
+			if summariesOnly && !strings.HasPrefix(line.text, "fix_summary: ") {
+				continue
+			}
+			if !summariesOnly && !line.finding {
 				continue
 			}
 			lines = append(lines[:i], lines[i+1:]...)
 			dropped++
-			if line.finding {
-				findingCount--
-			}
 			return true
 		}
 		return false
-	}
-	for findingCount > maxDecisionLinesPerSection {
-		dropOldest(true)
 	}
 
 	for {
@@ -214,10 +232,45 @@ func renderBoundedRoundHistory(prefix string, blocks []string) string {
 			}
 			return prefix + note + strings.Join(rendered, "\n")
 		}
-		if !dropOldest(true) && !dropOldest(false) {
-			return prefix + note
+		if !dropOldest(true) {
+			compacted := false
+			for i := range lines {
+				if !lines[i].finding {
+					continue
+				}
+				var payload map[string]any
+				if json.Unmarshal([]byte(strings.TrimPrefix(lines[i].text, "  - ")), &payload) != nil {
+					continue
+				}
+				if description, ok := payload["description"].(string); ok {
+					delete(payload, "description")
+					encoded, _ := json.Marshal(payload)
+					if description != "" {
+						lines[i].text = "  - " + string(encoded)
+						lines[i].truncated = true
+						compacted = true
+						break
+					}
+				}
+			}
+			if !compacted && !dropOldest(false) {
+				if len(lines) == 0 {
+					return prefix + note
+				}
+				lines = lines[1:]
+				dropped++
+			}
 		}
 	}
+}
+
+func boundedHistoryText(text string, limit int) string {
+	const suffix = "...[summary truncated]"
+	end := limit - len(suffix)
+	for end > 0 && text[end]&0xc0 == 0x80 {
+		end--
+	}
+	return text[:end] + suffix
 }
 
 func roundHistoryOmissionNote(dropped, truncated int) string {
@@ -226,7 +279,7 @@ func roundHistoryOmissionNote(dropped, truncated int) string {
 		parts = append(parts, fmt.Sprintf("%d older round-history line(s) omitted for length", dropped))
 	}
 	if truncated > 0 {
-		parts = append(parts, fmt.Sprintf("%d overlong round-history line(s) truncated for length", truncated))
+		parts = append(parts, fmt.Sprintf("%d round-history line(s) truncated for length (text omitted for length)", truncated))
 	}
 	if len(parts) == 0 {
 		return ""

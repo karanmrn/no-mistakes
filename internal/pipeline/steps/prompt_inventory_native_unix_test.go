@@ -43,22 +43,31 @@ func TestPRDraftNativeLargeInventory(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir = quotedDir
-	if err := os.MkdirAll(filepath.Join(dir, "generated"), 0o755); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"assets", "internal", "public"} {
+		if err := os.MkdirAll(filepath.Join(dir, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for i := range 1222 {
-		path := filepath.Join(dir, "generated", fmt.Sprintf("%04d-%s.ts", i, strings.Repeat("generated-long-name-", 5)))
+		group := "assets"
+		if i >= 611 {
+			group = "public"
+		}
+		path := filepath.Join(dir, group, fmt.Sprintf("%04d-%s.ts", i, strings.Repeat("generated-long-name-", 5)))
 		if err := os.WriteFile(path, []byte("export const value = 1;\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	gitCmd(t, dir, "mv", "base.txt", "source's renamed.txt")
+	gitCmd(t, dir, "mv", "base.txt", "internal/source's renamed.go")
+	if err := os.WriteFile(filepath.Join(dir, "internal", "source.go"), []byte("package fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	gitCmd(t, dir, "add", ".")
 	gitCmd(t, dir, "commit", "-m", "fixture inventory")
 	head := gitCmd(t, dir, "rev-parse", "HEAD")
 	paths := gitCmd(t, dir, "diff", "--name-status", base+".."+head)
-	if got := len(strings.Split(paths, "\n")); got != 1224 {
-		t.Fatalf("fixture paths = %d, want 1224", got)
+	if got := len(strings.Split(paths, "\n")); got != 1225 {
+		t.Fatalf("fixture paths = %d, want 1225", got)
 	}
 	ag, recording := recordNativeClaude(t, `{"title":"fix: bound prompt inventories","body":"## What Changed\n- Bound repeated inventories."}`)
 	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
@@ -69,16 +78,16 @@ func TestPRDraftNativeLargeInventory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("native prompt bytes=%d paths=1224 generated=1222 base=%s head=%s", len(raw), base, head)
+	t.Logf("native prompt bytes=%d paths=1225 generated=1222 base=%s head=%s", len(raw), base, head)
 	if proof := os.Getenv("NM_RETRO_PROOF_DIR"); proof != "" {
 		if err := os.WriteFile(filepath.Join(proof, "pr-large-prompt.txt"), raw, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if len(raw) > 32*1024 {
-		t.Fatalf("native PR prompt is %d bytes for a redundant 1224-path inventory, want <= 32768", len(raw))
+		t.Fatalf("native PR prompt is %d bytes for a redundant 1225-path inventory, want <= 32768", len(raw))
 	}
-	for _, required := range []string{base, head, "source's renamed.txt", "1224", "omitted"} {
+	for _, required := range []string{base, head, "internal/source's renamed.go", "A\tinternal/source.go", "R100\tbase.txt", "1225", `"assets": 611 changed, 2 shown, 609 omitted`, `"public": 611 changed, 2 shown, 609 omitted`} {
 		if !strings.Contains(string(raw), required) {
 			t.Errorf("native prompt lost %q", required)
 		}
@@ -104,6 +113,25 @@ func TestPRDraftNativeLargeInventory(t *testing.T) {
 		}
 	}
 
+	if _, err := (&PRStep{}).draftTemplateNarrative(sctx, "feature", "main", base, "## What Changed\n"); err != nil {
+		t.Fatal(err)
+	}
+	templateRaw, err := os.ReadFile(recording)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, prompt := range map[string][]byte{"title": titleRaw, "template": templateRaw} {
+		if len(prompt) > 16*1024 {
+			t.Fatalf("%s prompt exceeds bound: %d", name, len(prompt))
+		}
+		for _, anchor := range []string{base, head, "A\tinternal/source.go", "R100\tbase.txt\tinternal/source's renamed.go", `"assets": 611 changed, 2 shown, 609 omitted`, `"public": 611 changed, 2 shown, 609 omitted`} {
+			if !strings.Contains(string(prompt), anchor) {
+				t.Errorf("%s lost %q", name, anchor)
+			}
+		}
+		assertNativeDiffRecovery(t, string(prompt), dir, base, head)
+	}
+
 	reviewedPaths := strings.Split(gitCmd(t, dir, "diff", "--name-only", "--no-renames", base+".."+head), "\n")
 	findings := cleanReviewFindings()
 	findings.ReviewedPaths = reviewedPaths
@@ -113,7 +141,7 @@ func TestPRDraftNativeLargeInventory(t *testing.T) {
 	}
 	reviewAgent, reviewRecording := recordNativeClaude(t, string(payload))
 	reviewCtx := newTestContextWithDBRecords(t, reviewAgent, dir, base, head, config.Commands{})
-	reviewCtx.Config.Review.PathInstructions = []config.PathInstruction{{Path: "generated/*.ts", Instructions: "Trusted rule for every generated path."}}
+	reviewCtx.Config.Review.PathInstructions = []config.PathInstruction{{Path: "assets/*.ts", Instructions: "Trusted rule for every generated path."}}
 	outcome, err := (&ReviewStep{}).Execute(reviewCtx)
 	if err != nil {
 		t.Fatal(err)
@@ -121,8 +149,8 @@ func TestPRDraftNativeLargeInventory(t *testing.T) {
 	if outcome == nil {
 		t.Fatal("native Review returned no coverage outcome")
 	}
-	if len(outcome.ReviewedPaths) != 1225 || len(outcome.ReviewablePaths) != 1225 {
-		t.Fatalf("complete Review coverage changed: got %d reviewed, %d reviewable, want 1225 including both rename anchors", len(outcome.ReviewedPaths), len(outcome.ReviewablePaths))
+	if len(outcome.ReviewedPaths) != 1226 || len(outcome.ReviewablePaths) != 1226 {
+		t.Fatalf("complete Review coverage changed: got %d reviewed, %d reviewable, want 1226 including both rename anchors", len(outcome.ReviewedPaths), len(outcome.ReviewablePaths))
 	}
 	reviewRaw, err := os.ReadFile(reviewRecording)
 	if err != nil {
@@ -137,7 +165,7 @@ func TestPRDraftNativeLargeInventory(t *testing.T) {
 	if !strings.Contains(prompt, "Trusted rule for every generated path.") {
 		t.Fatal("trusted path instruction disappeared")
 	}
-	t.Logf("native Review retains all 1225 paths including both rename anchors; prompt bytes=%d", len(reviewRaw))
+	t.Logf("native Review retains all 1226 paths including both rename anchors; prompt bytes=%d", len(reviewRaw))
 	if proof := os.Getenv("NM_RETRO_PROOF_DIR"); proof != "" {
 		if err := os.WriteFile(filepath.Join(proof, "review-complete-coverage-prompt.txt"), reviewRaw, 0o600); err != nil {
 			t.Fatal(err)
@@ -161,8 +189,8 @@ func assertNativeDiffRecovery(t *testing.T, prompt, dir, base, head string) {
 		if strings.Contains(line, " --name-status ") {
 			args = append(args, "--name-status")
 		}
-		if strings.Contains(line, " --stat ") {
-			args = append(args, "--stat")
+		if strings.Contains(line, " --stat=4096 ") {
+			args = append(args, "--stat=4096")
 		}
 		args = append(args, base+".."+head, "--")
 		want := gitCmd(t, dir, args...)
@@ -177,7 +205,7 @@ func assertNativeDiffRecovery(t *testing.T, prompt, dir, base, head string) {
 }
 
 func TestReviewNativeUncertifiedHistoryBounded(t *testing.T) {
-	for _, count := range []int{1, 100} {
+	for _, count := range []int{1, 6, 100} {
 		t.Run(fmt.Sprintf("rounds-%d", count), func(t *testing.T) {
 			dir, base, head := setupGitRepo(t)
 			required := `{"findings":[{"id":"required-1","severity":"error","file":"feature.txt","line":1,"description":"Required unresolved behavior must remain visible.","action":"auto-fix"}],"summary":"Still required","reviewed_paths":["feature.txt"],"risk_level":"low","risk_rationale":"Fixture exercises metadata only.","risk_scope":"source-or-external"}`
@@ -189,19 +217,11 @@ func TestReviewNativeUncertifiedHistoryBounded(t *testing.T) {
 				sctx.UncertifiedPriorRounds = append(sctx.UncertifiedPriorRounds, &db.StepRound{Round: i + 1, Trigger: "auto_fix", FixSummary: &summary})
 			}
 			sctx.Config.Review.PathInstructions = []config.PathInstruction{{Path: "*.txt", Instructions: "Trusted path rule must remain visible."}}
-			step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
-			if err != nil {
-				t.Fatal(err)
-			}
-			sctx.StepResultID = step.ID
-			round, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", &required, nil, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
+			latest := sctx.UncertifiedPriorRounds[len(sctx.UncertifiedPriorRounds)-1]
+			latest.FindingsJSON = &required
 			selected := `["required-1"]`
-			if err := sctx.DB.SetStepRoundSelection(round.ID, &selected, db.RoundSelectionSourceUser); err != nil {
-				t.Fatal(err)
-			}
+			source := db.RoundSelectionSourceUser
+			latest.SelectedFindingIDs, latest.SelectionSource = &selected, &source
 			outcome, err := (&ReviewStep{}).Execute(sctx)
 			if err != nil {
 				t.Fatal(err)
@@ -282,4 +302,15 @@ func TestPRDraftNativeSmallInventoryUnchanged(t *testing.T) {
 	if !strings.Contains(string(titleRaw), "Final diff paths and statuses:\n"+paths) {
 		t.Fatal("ordinary configured-title inventory changed")
 	}
+	if _, err := (&PRStep{}).draftTemplateNarrative(sctx, "feature", "main", base, "## What Changed\n"); err != nil {
+		t.Fatal(err)
+	}
+	templateRaw, err := os.ReadFile(recording)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(templateRaw), "Final diff paths and statuses:\n"+paths) || strings.Contains(string(templateRaw), "omitted") {
+		t.Fatal("ordinary template inventory changed")
+	}
+
 }

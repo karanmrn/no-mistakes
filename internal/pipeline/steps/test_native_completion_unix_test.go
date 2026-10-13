@@ -17,7 +17,7 @@ import (
 )
 
 func TestTestNativeEarlyResultChildCompletion(t *testing.T) {
-	for _, mode := range []string{"success", "failure", "deadline"} {
+	for _, mode := range []string{"early-exit", "early-exit-redirected", "early-repair", "success", "failure", "deadline"} {
 		t.Run(mode, func(t *testing.T) {
 			dir, base, head := setupGitRepo(t)
 			controls := t.TempDir()
@@ -32,7 +32,15 @@ func TestTestNativeEarlyResultChildCompletion(t *testing.T) {
 				code = 7
 			}
 			script := "#!/bin/sh\ncat > " + quote(recording) + "\ntrap " + quote("printf cancelled > "+quote(cancelled)+"; exit 143") + " TERM\n(while [ ! -e " + quote(release) + " ]; do sleep 0.02; done; printf '%s' completed > " + quote(completed) + fmt.Sprintf("; exit %d) &\nchild=$!\nprintf '%%s\\n' ", code) + quote(payload) + "\nprintf '%s' ready > " + quote(ready) + "\n"
-			script += "wait \"$child\"\n"
+			early := strings.HasPrefix(mode, "early-")
+			if mode == "early-exit-redirected" {
+				script = strings.Replace(script, ") &\nchild=$!", ") >/dev/null 2>&1 &\nchild=$!", 1)
+			}
+			if early {
+				script += "exit 0\n"
+			} else {
+				script += "wait \"$child\"\n"
+			}
 			if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -41,6 +49,10 @@ func TestTestNativeEarlyResultChildCompletion(t *testing.T) {
 				t.Fatal(err)
 			}
 			sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+			if mode == "early-repair" {
+				sctx.Fixing = true
+				sctx.PreviousFindings = `{"findings":[{"id":"required-check","severity":"error","description":"Required check failed","action":"auto-fix"}]}`
+			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			sctx.Ctx = ctx
@@ -71,7 +83,7 @@ func TestTestNativeEarlyResultChildCompletion(t *testing.T) {
 				case <-time.After(10 * time.Millisecond):
 				}
 			}
-			if mode != "deadline" {
+			if mode != "deadline" && !early {
 				select {
 				case r := <-result:
 					t.Fatalf("step returned before required child completion: outcome=%#v error=%v", r.outcome, r.err)
@@ -98,13 +110,27 @@ func TestTestNativeEarlyResultChildCompletion(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			for _, required := range []string{"Await every required production", "actual exit", "still running", "inconclusive"} {
+			obligations := []string{"Await every required production", "actual exit", "still running", "inconclusive"}
+			if mode == "early-repair" {
+				obligations = []string{"Await every required check", "actual exit status", "incomplete verification"}
+			}
+			for _, required := range obligations {
 				if !strings.Contains(string(raw), required) {
 					t.Errorf("native Test instructions lost completion obligation %q", required)
 				}
 			}
 
 			switch mode {
+			case "early-exit", "early-exit-redirected", "early-repair":
+				if got.err == nil || !strings.Contains(got.err.Error(), "native check completion is unverified") {
+					t.Fatalf("early structured success was not refused: %#v %v", got.outcome, got.err)
+				}
+				if got.outcome != nil && !got.outcome.NeedsApproval {
+					t.Fatal("premature check was accepted")
+				}
+				if _, err := os.Stat(completed); err == nil {
+					t.Fatal("required child completed before the refusal")
+				}
 			case "success":
 				if got.err != nil || got.outcome == nil || got.outcome.NeedsApproval {
 					t.Fatalf("delayed successful child did not pass: %#v %v", got.outcome, got.err)

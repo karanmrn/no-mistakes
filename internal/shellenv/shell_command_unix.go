@@ -143,6 +143,17 @@ func TerminateShellCommandGroup(cmd *exec.Cmd) {
 	_ = syscall.Kill(-pgid, syscall.SIGKILL)
 }
 
+func ShellCommandGroupActive(cmd *exec.Cmd) (bool, error) {
+	if cmd == nil || cmd.Process == nil {
+		return false, errors.New("command was not started")
+	}
+	err := syscall.Kill(-cmd.Process.Pid, 0)
+	if errors.Is(err, syscall.ESRCH) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 // groupGoneWithin reports whether the process group emptied out before the
 // window elapsed.
 func groupGoneWithin(pgid int, window time.Duration) bool {
