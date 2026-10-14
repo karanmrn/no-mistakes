@@ -22,6 +22,7 @@ import (
 var (
 	daemonRun                  = daemon.Run
 	daemonStartFn              = daemon.Start
+	daemonStartGuardedFn       = daemon.StartGuarded
 	daemonStopFn               = daemon.Stop
 	daemonUninstallFn          = daemon.Uninstall
 	daemonUninstallSupportedFn = daemon.UninstallSupported
@@ -533,7 +534,8 @@ func dedupeSteps(steps []types.StepName) []types.StepName {
 }
 
 func newDaemonStartCmd() *cobra.Command {
-	return &cobra.Command{
+	var force bool
+	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "Install or refresh the managed daemon service and start it",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -548,7 +550,13 @@ func newDaemonStartCmd() *cobra.Command {
 				if err := p.EnsureDirs(); err != nil {
 					return err
 				}
-				if err := daemonStartFn(p); err != nil {
+				// Only a running daemon whose service definition drifted is
+				// restarted, so only that path needs the active-run guard.
+				guard := func() error {
+					logLifecycleInvocation("daemon.start", force)
+					return guardDestructiveDaemonLifecycle(p, cmd.ErrOrStderr(), "daemon start", force)
+				}
+				if err := daemonStartGuardedFn(p, guard); err != nil {
 					return err
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "  %s daemon started\n", sGreen.Render("✓"))
@@ -556,6 +564,8 @@ func newDaemonStartCmd() *cobra.Command {
 			})
 		},
 	}
+	cmd.Flags().BoolVar(&force, "force", false, "restart a running daemon to refresh its service definition even when pipeline runs are active")
+	return cmd
 }
 
 func newDaemonStopCmd() *cobra.Command {

@@ -61,11 +61,12 @@ If the daemon is already running from a different executable path, update still 
 If the daemon executable path cannot be determined, the update aborts before replacing anything.
 
 `no-mistakes daemon stop`, `no-mistakes daemon uninstall`, and `no-mistakes daemon restart` apply the same guard: if pending or running pipeline runs exist, each refuses by default and lists the active runs, and each takes its own `--force` to proceed anyway.
+`no-mistakes daemon start` applies it only when it would restart a running daemon to refresh a changed service definition; it then refuses before rewriting the definition, and takes `--force` the same way.
 That `--force` override is available only to an ordinary top-level caller. A
 process descended from an active validation-step agent cannot start, stop,
 restart, uninstall, or update the daemon; recursive containment refuses the command before
 any lifecycle mutation, with no `--force` or `--yes` bypass.
-Every invocation of `daemon stop`, `daemon uninstall`, `daemon restart`, or `update` - forced or not - logs the caller's PID, parent PID, and parent command line to `~/.no-mistakes/logs/cli.log` so a later incident can identify which agent or process triggered it.
+Every invocation of `daemon stop`, `daemon uninstall`, `daemon restart`, or `update`, and every `daemon start` that would restart a running daemon - forced or not - logs the caller's PID, parent PID, and parent command line to `~/.no-mistakes/logs/cli.log` so a later incident can identify which agent or process triggered it.
 
 The daemon writes an identity record to `~/.no-mistakes/daemon.pid` and listens on a Unix socket at `~/.no-mistakes/socket`. On Windows, it uses a localhost TCP listener and a protected endpoint file at the same path. CLI clients bound how long they wait for that socket to accept a connection with `daemon_connect_timeout` (default `3s`, override with `NM_DAEMON_CONNECT_TIMEOUT`), so a daemon process that is alive but stuck fails the connection instead of hanging the caller; see [Troubleshooting](/no-mistakes/guides/troubleshooting/#check-for-stale-artifacts).
 When the socket file exists but refuses connections and the PID file names a daemon that is provably gone (its process no longer exists, or its start time no longer matches), every status probe treats the daemon as not running and removes the stale socket and PID file, so `daemon status` reports `daemon not running` and `update` goes on to start the new daemon. The removal happens only while holding the singleton lock and only if the PID file is unchanged, so it never touches a daemon that is starting up. A live or unverifiable recorded PID leaves both files in place, and commands that ensure the daemon is running (`no-mistakes`, `init`, `attach`, `rerun`, `axi run`, `axi respond`) then fail fast rather than silently starting a replacement daemon; `no-mistakes daemon start` self-heals past that case.
@@ -123,7 +124,9 @@ reason about in one long-lived process than inside independent hook invocations.
 
 ## Crash recovery
 
-On startup, the daemon checks for runs that were left in `pending` or `running` status (which means the daemon crashed while they were active):
+A clean stop (`SIGTERM`, `daemon stop`, `daemon restart`) leaves a run that is fully recorded as waiting at an approval gate exactly as a crash would, so the next start resumes it at that gate. A clean stop still fails a run that is in the middle of a step.
+
+On startup, the daemon checks for runs that were left in `pending` or `running` status (which means the daemon stopped while they were active):
 
 - Completes legacy active rows whose persisted PR state is already `merged` or `closed`, including their CI step, before active-run recovery and parked-run planning
 - Resumes only fully recorded parked approval gates whose worktree and step history can be validated; incomplete or ambiguous active runs fail closed
@@ -163,6 +166,6 @@ The [starting and stopping](#starting-and-stopping) section owns the active-run
 guard, the top-level `--force` override, and the separate validation-step
 containment rule.
 
-1. Cancels all active runs
+1. Cancels all active runs, except that a run fully recorded as waiting at an approval gate keeps its record and worktree so the next start resumes it (see [Crash recovery](#crash-recovery))
 2. Waits up to 30 seconds for goroutines to finish
 3. Removes the PID file and socket

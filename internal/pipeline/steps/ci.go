@@ -66,6 +66,10 @@ type CIStep struct {
 	// must not re-arm the timeout. Overridable for testing; defaults to
 	// fetching the upstream default branch.
 	baseBranchTip func(context.Context) (string, bool)
+	// replayBase is the resolved base tip an in-flight rebase repair targets,
+	// set only for the duration of that repair's recording. recordRepair
+	// proves a pure replay against exactly this commit and nothing else.
+	replayBase string
 }
 
 // SetPollIntervalOverride is a test hook; production leaves the override unset.
@@ -373,7 +377,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 		retryRefusal = false
 		if repair.Revalidate {
-			return &pipeline.StepOutcome{RestartFrom: types.StepReview}, nil
+			return &pipeline.StepOutcome{RestartFrom: repair.restartFrom()}, nil
 		}
 	}
 	baseBranch := effectivePRBaseBranch(sctx)
@@ -400,6 +404,28 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 		if repairOutcome != nil {
 			return repairOutcome, nil
+		}
+		// A repair that recorded nothing (the fixer failed) must not fall
+		// through to monitoring the old published head while a carried review
+		// approval still awaits its restart at Test: green checks there would
+		// complete the run with the carried head never published. A commit the
+		// failed fixer still left on top of the carried head goes through
+		// recordRepair like any other, so it revokes the approval and restarts
+		// at Review; only the unchanged carried head restarts at Test.
+		pending, err := sctx.DB.RunTestRestartPending(sctx.Run.ID)
+		if err != nil {
+			return nil, err
+		}
+		if pending {
+			head, err := stepGitHeadSHA(sctx)
+			if err != nil {
+				return nil, fmt.Errorf("resolve head after failed CI fix: %w", err)
+			}
+			repair, err := s.recordRepair(sctx, head)
+			if err != nil {
+				return nil, err
+			}
+			return &pipeline.StepOutcome{RestartFrom: repair.restartFrom(), Findings: sctx.DeferredFindings}, nil
 		}
 	}
 

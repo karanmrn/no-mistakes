@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.96.0](https://github.com/kunchenguid/no-mistakes/compare/v1.95.0...v1.96.0) (2026-10-13)
+
+
+### Features
+
+* **ci:** opt-in carry of Review approval across a pure-replay rebase repair ([#1442](https://github.com/kunchenguid/no-mistakes/issues/1442)) ([911ab15](https://github.com/kunchenguid/no-mistakes/commit/911ab1506cda7b0ab9acdd5c8a7d42165a5f4be2))
+
+
+### Bug Fixes
+
+* **daemon:** guard daemon start's drift restart against active runs ([#1443](https://github.com/kunchenguid/no-mistakes/issues/1443)) ([54c1550](https://github.com/kunchenguid/no-mistakes/commit/54c155053a7fad1e5fac3b5b04c186e7ed93c39c)), closes [#1425](https://github.com/kunchenguid/no-mistakes/issues/1425)
+* **daemon:** keep runs parked at an approval gate across a clean stop ([#1438](https://github.com/kunchenguid/no-mistakes/issues/1438)) ([82747bc](https://github.com/kunchenguid/no-mistakes/commit/82747bcd7f5cf3e558c7d449ac9eb240e7934aca))
+* **gitlab:** ignore allowed job failures ([#1439](https://github.com/kunchenguid/no-mistakes/issues/1439)) ([3cb4df4](https://github.com/kunchenguid/no-mistakes/commit/3cb4df456cd092464a154e24f417397fdff67d47))
+
+## [1.95.0](https://github.com/kunchenguid/no-mistakes/compare/v1.94.0...v1.95.0) (2026-10-12)
+
+
+### Features
+
+* **config:** allow machine-local PR publication defaults ([#1430](https://github.com/kunchenguid/no-mistakes/issues/1430)) ([c80bff0](https://github.com/kunchenguid/no-mistakes/commit/c80bff06ac6aa4c040970b629d39f84e9509ea6f))
+
+
+### Bug Fixes
+
+* **pipeline:** let a no-op document pass succeed with an empty summary ([#1431](https://github.com/kunchenguid/no-mistakes/issues/1431)) ([3f2d556](https://github.com/kunchenguid/no-mistakes/commit/3f2d556da73fb684828a0a5c6e3fb29ff8e746e7))
+* **pipeline:** opt-in rebase of a green GitHub PR that is BEHIND its base ([#1404](https://github.com/kunchenguid/no-mistakes/issues/1404)) ([e20dec9](https://github.com/kunchenguid/no-mistakes/commit/e20dec9820d821bc38f62f4f7bd52f58f3ea760a))
+* **scm:** support tea 1.0 alongside tea 0.x in the Gitea adapter ([#1437](https://github.com/kunchenguid/no-mistakes/issues/1437)) ([0afa72c](https://github.com/kunchenguid/no-mistakes/commit/0afa72cb5164896e9c42fddd446161abd337db7d))
+
 ## [1.94.0](https://github.com/kunchenguid/no-mistakes/compare/v1.93.0...v1.94.0) (2026-10-11)
 
 
