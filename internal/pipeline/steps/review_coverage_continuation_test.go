@@ -216,6 +216,7 @@ func testRetainedCoverageCase(t *testing.T, recovered bool, mode string) {
 		}
 		executor = pipeline.NewExecutor(sctx.DB, p, sctx.Config, ag, []pipeline.Step{&ReviewStep{}, &coverageContinuationTestGate{}}, nil)
 		ctx, cancel = context.WithCancelCause(context.Background())
+		defer cancel(pipeline.ErrDaemonShutdown)
 		done = make(chan error, 1)
 		finished = make(chan struct{})
 		go func() { defer close(finished); done <- executor.Resume(ctx, sctx.Run, sctx.Repo, dir) }()
