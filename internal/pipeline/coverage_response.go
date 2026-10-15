@@ -7,42 +7,105 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func CanContinueReviewCoverage(step types.StepName, payload string) bool {
-	return validateCoverageResponse(step, payload, nil, nil, nil, nil) == nil
+	if validateCoverageResponse(step, payload, nil, nil, nil, nil) != nil {
+		return false
+	}
+	findings, err := types.ParseFindingsJSON(payload)
+	return err == nil && validCoverageRecordShape(findings)
 }
 
-func (e *Executor) validateCoverageBinding(bindings []*ipc.CoverageBinding) error {
+func (e *Executor) validateCoverageBinding(bindings []*ipc.CoverageBinding) (*db.StepRound, error) {
 	if len(bindings) != 1 || bindings[0] == nil {
-		return fmt.Errorf("coverage continuation requires the observed head, step and round")
+		return nil, fmt.Errorf("coverage continuation requires the observed head, step and round")
 	}
 	b := bindings[0]
 	if b.HeadSHA == "" || b.StepResultID == "" || b.RoundID == "" || b.StepResultID != e.waitingStepResultID || b.RoundID != e.waitingRoundID {
-		return fmt.Errorf("coverage continuation refers to a different or stale review gate")
+		return nil, fmt.Errorf("coverage continuation refers to a different or stale review gate")
 	}
 	step, err := e.db.GetStepResult(e.waitingStepResultID)
 	if err != nil || step == nil {
-		return fmt.Errorf("cannot verify the parked review step for coverage continuation")
+		return nil, fmt.Errorf("cannot verify the parked review step for coverage continuation")
 	}
 	run, err := e.db.GetRun(step.RunID)
 	if err != nil || run == nil || run.Status != types.RunRunning || run.HeadSHA != b.HeadSHA {
-		return fmt.Errorf("coverage continuation head does not match the current run head")
+		return nil, fmt.Errorf("coverage continuation head does not match the current run head")
+	}
+	rounds, err := e.db.GetRoundsByStep(step.ID)
+	if err != nil || len(rounds) == 0 || rounds[len(rounds)-1].ID != b.RoundID {
+		return nil, fmt.Errorf("cannot verify the current stored coverage round")
+	}
+	round := rounds[len(rounds)-1]
+	trusted := ""
+	if e.config != nil {
+		trusted = e.config.TrustedConfigSHA
+	}
+	if _, err := RetainedReviewCoverage(round, run, step.ID, trusted); err != nil {
+		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(e.runContext(context.Background()), 5*time.Second)
 	defer cancel()
 	head, err := git.HeadSHA(ctx, e.workDir)
 	if err != nil || head != b.HeadSHA {
-		return fmt.Errorf("coverage continuation worktree head does not match the observed run head")
+		return nil, fmt.Errorf("coverage continuation worktree head does not match the observed run head")
 	}
 	dirty, err := git.Run(ctx, e.workDir, "status", "--porcelain")
 	if err != nil || strings.TrimSpace(dirty) != "" {
-		return fmt.Errorf("coverage continuation requires a clean worktree; existing work was preserved")
+		return nil, fmt.Errorf("coverage continuation requires a clean worktree; existing work was preserved")
 	}
-	return nil
+	return round, nil
+}
+
+// RetainedReviewCoverage validates persisted evidence, never caller-supplied
+// coverage. The concrete review step also compares the current trusted paths
+// and resolved merge base before it asks an agent to complete the remainder.
+func RetainedReviewCoverage(round *db.StepRound, run *db.Run, stepID, trusted string) (types.Findings, error) {
+	refuse := func() (types.Findings, error) {
+		return types.Findings{}, fmt.Errorf("coverage continuation requires a valid stored same-run/head/base/trusted-scope record")
+	}
+	if round == nil || run == nil || round.ID == "" || round.StepResultID != stepID || round.FindingsJSON == nil || round.ReviewedHeadSHA == nil || *round.ReviewedHeadSHA != run.HeadSHA {
+		return refuse()
+	}
+	findings, err := types.ParseFindingsJSON(*round.FindingsJSON)
+	if err != nil || !validCoverageRecordShape(findings) {
+		return refuse()
+	}
+	scope := findings.ReviewCoverageScope
+	if scope.RunID != run.ID || scope.StepResultID != stepID || scope.HeadSHA != run.HeadSHA || scope.RunBaseSHA != run.BaseSHA || scope.TrustedConfigSHA != trusted {
+		return refuse()
+	}
+	return findings, nil
+}
+
+func validCoverageRecordShape(findings types.Findings) bool {
+	scope := findings.ReviewCoverageScope
+	if len(findings.Items) != 0 || scope == nil || scope.Version != 1 || scope.RunID == "" || scope.StepResultID == "" || scope.HeadSHA == "" || scope.RunBaseSHA == "" || scope.BaseSHA == "" || scope.TrustedConfigSHA == "" || len(scope.Paths) == 0 {
+		return false
+	}
+	paths := make(map[string]bool, len(scope.Paths))
+	for _, name := range scope.Paths {
+		if name == "" || paths[name] {
+			return false
+		}
+		paths[name] = true
+	}
+	reviewed := make(map[string]bool, len(findings.ReviewedPaths))
+	for _, name := range findings.ReviewedPaths {
+		if !paths[name] {
+			return false
+		}
+		reviewed[name] = true
+	}
+	if len(reviewed) == len(paths) {
+		return false
+	}
+	return true
 }
 
 func validateCoverageResponse(step types.StepName, payload string, findingIDs, ignoredIDs []string, instructions map[string]string, added []types.Finding) error {

@@ -208,7 +208,9 @@ Run the pipeline and decide on its findings as they come up:
    # continue static review when coverage is incomplete and findings are empty
    no-mistakes axi respond --step review --action complete-coverage
    ` + "```" + `
-   ` + "`complete-coverage`" + ` starts another static review in the same run.
+   ` + "`complete-coverage`" + ` runs a fresh reviewer over only the missing paths.
+   It reuses stored coverage only for the same run, step, round, head, base, and trusted scope.
+   Missing or invalid provenance keeps Review gated. Source changes during the turn also keep it gated.
    It never approves incomplete coverage, runs a code fixer, or answers a question.
    It refuses outstanding findings, finding overrides, and ` + "`--yes`" + `.
    With ` + "`--action fix`" + `, declines are explicit: every finding the gate shows

@@ -42,6 +42,7 @@ type approvalResponse struct {
 	instructions   map[string]string
 	addedFindings  []types.Finding
 	approvalReason string
+	coverageRound  *db.StepRound
 	// ignoreFindingIDs is the validated decline list of a fix response. It is
 	// not dispatch input (the decline set is derived from the selection on
 	// read), but an accepted response that selects nothing still has to be
@@ -226,12 +227,15 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		e.mu.Unlock()
 		return RespondDispositions{}, fmt.Errorf("step mismatch: responding to %q but %q is awaiting approval", step, e.waitingStep)
 	}
+	var coverageRound *db.StepRound
 	if action == types.ActionCompleteCoverage {
 		if err := validateCoverageResponse(step, e.waitingFindings, findingIDs, ignoreFindingIDs, instructions, addedFindings); err != nil {
 			e.mu.Unlock()
 			return RespondDispositions{}, err
 		}
-		if err := e.validateCoverageBinding(coverage); err != nil {
+		var err error
+		coverageRound, err = e.validateCoverageBinding(coverage)
+		if err != nil {
 			e.mu.Unlock()
 			return RespondDispositions{}, err
 		}
@@ -250,6 +254,7 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		instructions:   instructions,
 		addedFindings:  addedFindings,
 		approvalReason: approvalReason,
+		coverageRound:  coverageRound,
 	}
 	dispositions := RespondDispositions{}
 	if action == types.ActionFix {
@@ -506,6 +511,7 @@ type stepExecutionState struct {
 	// what skipFixExecution above is for.
 	answering              bool
 	completingCoverage     bool
+	coverageRound          *db.StepRound
 	previousFindings       string
 	deferredFindings       string
 	roundNum               int
@@ -761,6 +767,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		}
 		if response.action == types.ActionCompleteCoverage {
 			state.completingCoverage = true
+			state.coverageRound = response.coverageRound
 			state.outstandingFindings = gate.findings
 			state.selectedOutstandingIDs = gate.selectedOutstandingIDs
 		} else if response.action == types.ActionAnswer {
@@ -1226,29 +1233,30 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		return nil
 	}
 	sctx := &StepContext{
-		Ctx:               ctx,
-		Run:               run,
-		Repo:              repo,
-		WorkDir:           workDir,
-		GateDir:           e.paths.RepoDir(repo.ID),
-		Agent:             stepAgent,
-		Config:            e.config,
-		ForgeContext:      e.forge,
-		DB:                e.db,
-		StepResultID:      sr.ID,
-		UserIntent:        userIntent,
-		IntentSource:      userIntentSource,
-		Sessions:          e.sessions,
-		Shared:            e.shared,
-		EvidenceDir:       e.runEvidenceDir(run.ID),
-		Fixing:            state.fixing,
-		SkipFixExecution:  state.skipFixExecution,
-		FinalizingAnswers: state.answering,
-		CarriedFindings:   answerRoundCarriedFindings(state.answering, outstandingFindings),
-		PreviousFindings:  state.previousFindings,
-		DeferredFindings:  state.deferredFindings,
-		Log:               writeLog,
-		LogChunk:          writeLogChunk,
+		Ctx:                  ctx,
+		Run:                  run,
+		Repo:                 repo,
+		WorkDir:              workDir,
+		GateDir:              e.paths.RepoDir(repo.ID),
+		Agent:                stepAgent,
+		Config:               e.config,
+		ForgeContext:         e.forge,
+		DB:                   e.db,
+		StepResultID:         sr.ID,
+		UserIntent:           userIntent,
+		IntentSource:         userIntentSource,
+		Sessions:             e.sessions,
+		Shared:               e.shared,
+		EvidenceDir:          e.runEvidenceDir(run.ID),
+		Fixing:               state.fixing,
+		SkipFixExecution:     state.skipFixExecution,
+		FinalizingAnswers:    state.answering,
+		CoverageContinuation: state.coverageRound,
+		CarriedFindings:      answerRoundCarriedFindings(state.answering, outstandingFindings),
+		PreviousFindings:     state.previousFindings,
+		DeferredFindings:     state.deferredFindings,
+		Log:                  writeLog,
+		LogChunk:             writeLogChunk,
 		LogFile: func(text string) {
 			fmt.Fprintln(logFile, text)
 			touchLogActivity(text, true)
@@ -1302,6 +1310,7 @@ rounds:
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
 		outcome, err := step.Execute(sctx)
+		sctx.CoverageContinuation = nil
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}
@@ -1636,6 +1645,7 @@ rounds:
 				sctx.AutoFixRound = false
 				sctx.FinalizingAnswers = false
 				sctx.SkipFixExecution = false
+				sctx.CoverageContinuation = response.coverageRound
 				sctx.PreviousFindings = ""
 				sctx.DeferredFindings = ""
 				sctx.CarriedFindings = ""

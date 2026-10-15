@@ -249,7 +249,7 @@ func runAxiHome(cmd *cobra.Command) error {
 		// a verdict: approving would discard the pass it paused.
 		help = append(help, "Run `no-mistakes axi answer --question <id> --answer \"<one of its options>\"` for each question in the gate; the reviewer resumes when none are open, and the answer that closes the last one follows the run to its next gate or outcome")
 	case gatedOnCoverage:
-		help = append(help, "Run `no-mistakes axi respond --action complete-coverage` to continue static review without approving incomplete coverage")
+		help = append(help, "Run `no-mistakes axi respond --action complete-coverage` to review only the remaining paths using stored coverage")
 	case gated:
 		help = append(help, "Run `no-mistakes axi respond --action approve` to clear the current gate")
 	default:

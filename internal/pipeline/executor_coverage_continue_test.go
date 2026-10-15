@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,20 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func coverageFixtureFindings(t *testing.T, run *db.Run, stepID string, reviewed, reviewable []string) string {
+	t.Helper()
+	f := types.Findings{Items: []types.Finding{}, ReviewedPaths: reviewed, ReviewCoverageScope: &types.ReviewCoverageScope{Version: 1, RunID: run.ID, StepResultID: stepID, HeadSHA: run.HeadSHA, RunBaseSHA: run.BaseSHA, BaseSHA: run.BaseSHA, TrustedConfigSHA: "fixture-trusted", Paths: reviewable}}
+	b, err := json.Marshal(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func coverageFixtureOutcome(t *testing.T, sctx *StepContext, reviewed, reviewable []string) *StepOutcome {
+	return &StepOutcome{NeedsApproval: true, Findings: coverageFixtureFindings(t, sctx.Run, sctx.StepResultID, reviewed, reviewable), ReviewedPaths: reviewed, ReviewablePaths: reviewable, ReviewApprovedHeadSHA: sctx.Run.HeadSHA}
+}
 
 func coverageWorkdir(t *testing.T, database *db.DB, run *db.Run) string {
 	t.Helper()
@@ -72,12 +87,7 @@ func TestExecutor_IncompleteCoverageCanContinueWithoutFixOrApproval(t *testing.T
 	step := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
 		calls++
 		if calls == 1 {
-			return &StepOutcome{
-				NeedsApproval:   true,
-				Findings:        `{"findings":[],"reviewed_paths":["first.go"],"risk_level":"medium","risk_rationale":"Partial review","risk_scope":"source-or-external"}`,
-				ReviewedPaths:   []string{"first.go"},
-				ReviewablePaths: []string{"first.go", "second.go"},
-			}, nil
+			return coverageFixtureOutcome(t, sctx, []string{"first.go"}, []string{"first.go", "second.go"}), nil
 		}
 		if sctx.Fixing || sctx.FinalizingAnswers {
 			t.Error("coverage continuation dispatched a code fix or a fabricated answer")
@@ -89,7 +99,7 @@ func TestExecutor_IncompleteCoverageCanContinueWithoutFixOrApproval(t *testing.T
 			ReviewApprovedHeadSHA: run.HeadSHA,
 		}, nil
 	}}
-	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{step}, nil)
+	exec := NewExecutor(database, p, &config.Config{TrustedConfigSHA: "fixture-trusted"}, nil, []Step{step}, nil)
 	workDir := coverageWorkdir(t, database, run)
 	if err := os.MkdirAll(filepath.Join(workDir, ".tmp-evidence"), 0o700); err != nil {
 		t.Fatal(err)
@@ -158,7 +168,7 @@ func TestExecutor_CoverageContinuationRefusesOtherGatesAndOutstandingFindings(t 
 		t.Run(tc.name, func(t *testing.T) {
 			database, p, run, repo := setupTest(t)
 			step := &mockStep{name: tc.step, outcome: &StepOutcome{NeedsApproval: true, Findings: tc.body}}
-			exec := NewExecutor(database, p, &config.Config{}, nil, []Step{step}, nil)
+			exec := NewExecutor(database, p, &config.Config{TrustedConfigSHA: "fixture-trusted"}, nil, []Step{step}, nil)
 			ctx, cancel := context.WithCancel(context.Background())
 			workDir := coverageWorkdir(t, database, run)
 			finished := make(chan struct{})
@@ -198,7 +208,7 @@ func TestExecutor_PersistedFixReviewContinuesCoverageWithoutReplacingItsRun(t *t
 	if err := database.StartStep(sr.ID); err != nil {
 		t.Fatal(err)
 	}
-	body := `{"findings":[],"reviewed_paths":["first.go"]}`
+	body := coverageFixtureFindings(t, run, sr.ID, []string{"first.go"}, []string{"first.go", "second.go"})
 	if err := database.SetStepFindings(sr.ID, body); err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +242,7 @@ func TestExecutor_PersistedFixReviewContinuesCoverageWithoutReplacingItsRun(t *t
 			ReviewApprovedHeadSHA: run.HeadSHA,
 		}, nil
 	}}
-	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{step}, nil)
+	exec := NewExecutor(database, p, &config.Config{TrustedConfigSHA: "fixture-trusted"}, nil, []Step{step}, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	finished := make(chan struct{})
@@ -280,14 +290,9 @@ func TestExecutor_CoverageContinuationDoesNotCertifyAnotherPartialReview(t *test
 		if calls == 2 {
 			close(reviewedAgain)
 		}
-		return &StepOutcome{
-			NeedsApproval:   true,
-			Findings:        `{"findings":[],"reviewed_paths":["first.go"]}`,
-			ReviewedPaths:   []string{"first.go"},
-			ReviewablePaths: []string{"first.go", "second.go"},
-		}, nil
+		return coverageFixtureOutcome(t, sctx, []string{"first.go"}, []string{"first.go", "second.go"}), nil
 	}}
-	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{step}, nil)
+	exec := NewExecutor(database, p, &config.Config{TrustedConfigSHA: "fixture-trusted"}, nil, []Step{step}, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	workDir := coverageWorkdir(t, database, run)
 	finished := make(chan struct{})
@@ -336,8 +341,10 @@ func TestExecutor_CoverageContinuationRejectsStaleBindingsAndChangedSource(t *te
 		t.Run(mutation, func(t *testing.T) {
 			database, p, run, repo := setupTest(t)
 			workDir := coverageWorkdir(t, database, run)
-			step := &mockStep{name: types.StepReview, outcome: &StepOutcome{NeedsApproval: true, Findings: `{"findings":[]}`}}
-			exec := NewExecutor(database, p, &config.Config{}, nil, []Step{step}, nil)
+			step := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
+				return coverageFixtureOutcome(t, sctx, nil, []string{"first.go"}), nil
+			}}
+			exec := NewExecutor(database, p, &config.Config{TrustedConfigSHA: "fixture-trusted"}, nil, []Step{step}, nil)
 			ctx, cancel := context.WithCancel(context.Background())
 			finished := make(chan struct{})
 			go func() {
@@ -385,7 +392,7 @@ func TestExecutor_ConcurrentCoverageResponsesStartOnlyOneReview(t *testing.T) {
 	step := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
 		calls++
 		if calls == 1 {
-			return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[]}`}, nil
+			return coverageFixtureOutcome(t, sctx, nil, []string{"first.go"}), nil
 		}
 		close(started)
 		select {
@@ -395,7 +402,7 @@ func TestExecutor_ConcurrentCoverageResponsesStartOnlyOneReview(t *testing.T) {
 		}
 		return &StepOutcome{ReviewedPaths: []string{"first.go"}, ReviewablePaths: []string{"first.go"}}, nil
 	}}
-	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{step}, nil)
+	exec := NewExecutor(database, p, &config.Config{TrustedConfigSHA: "fixture-trusted"}, nil, []Step{step}, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	finished := make(chan struct{})
 	go func() {
