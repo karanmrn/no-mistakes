@@ -204,7 +204,13 @@ Run the pipeline and decide on its findings as they come up:
 
    # skip this step
    no-mistakes axi respond --action skip
+
+   # continue static review when coverage is incomplete and findings are empty
+   no-mistakes axi respond --step review --action complete-coverage
    ` + "```" + `
+   ` + "`complete-coverage`" + ` starts another static review in the same run.
+   It never approves incomplete coverage, runs a code fixer, or answers a question.
+   It refuses outstanding findings, finding overrides, and ` + "`--yes`" + `.
    With ` + "`--action fix`" + `, declines are explicit: every finding the gate shows
    must be listed in ` + "`--findings`" + ` or ` + "`--ignore`" + `, and a response that
    leaves one out is refused with the missing ids named while the gate stays

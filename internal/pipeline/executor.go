@@ -190,7 +190,7 @@ func (e *Executor) Respond(step types.StepName, action types.ApprovalAction, fin
 //
 // It returns the dispositions the response recorded, which the daemon echoes
 // to the caller.
-func (e *Executor) RespondWithOverrides(step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string) (RespondDispositions, error) {
+func (e *Executor) RespondWithOverrides(step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, coverage ...*ipc.CoverageBinding) (RespondDispositions, error) {
 	if approvalReason != "" && (step != types.StepTest || action != types.ActionApprove) {
 		return RespondDispositions{}, fmt.Errorf("an approval reason applies only to Test approval")
 	}
@@ -213,7 +213,7 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 	// refuses the handler's own release, and the gate parks forever with every
 	// question answered.
 	switch action {
-	case types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionAbort, types.ActionAnswer:
+	case types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionAbort, types.ActionAnswer, types.ActionCompleteCoverage:
 	default:
 		return RespondDispositions{}, fmt.Errorf("unrecognized approval action %q (valid: approve, fix, skip, abort, answer)", action)
 	}
@@ -225,6 +225,19 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 	if step != e.waitingStep {
 		e.mu.Unlock()
 		return RespondDispositions{}, fmt.Errorf("step mismatch: responding to %q but %q is awaiting approval", step, e.waitingStep)
+	}
+	if action == types.ActionCompleteCoverage {
+		if err := validateCoverageResponse(step, e.waitingFindings, findingIDs, ignoreFindingIDs, instructions, addedFindings); err != nil {
+			e.mu.Unlock()
+			return RespondDispositions{}, err
+		}
+		if err := e.validateCoverageBinding(coverage); err != nil {
+			e.mu.Unlock()
+			return RespondDispositions{}, err
+		}
+	} else if len(coverage) != 0 && coverage[0] != nil {
+		e.mu.Unlock()
+		return RespondDispositions{}, fmt.Errorf("coverage binding applies only to complete-coverage")
 	}
 	if action == types.ActionApprove && e.waitingApprovalRefusal != "" {
 		refusal := e.waitingApprovalRefusal
@@ -492,6 +505,7 @@ type stepExecutionState struct {
 	// the two answer paths disagree about the step's durable status. That is
 	// what skipFixExecution above is for.
 	answering              bool
+	completingCoverage     bool
 	previousFindings       string
 	deferredFindings       string
 	roundNum               int
@@ -738,14 +752,18 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	// same way; only the bookkeeping before it and the state handed in differ.
 	// An answer is not a verdict, so it records no selection on the round -
 	// leaving one would read as the human declining the round's findings.
-	case types.ActionFix, types.ActionAnswer:
+	case types.ActionFix, types.ActionAnswer, types.ActionCompleteCoverage:
 		state := stepExecutionState{
 			roundNum:        gate.round,
 			autoFixAttempts: gate.autoFixes,
 			executionMS:     duration,
 			currentRoundID:  gate.lastRoundID,
 		}
-		if response.action == types.ActionAnswer {
+		if response.action == types.ActionCompleteCoverage {
+			state.completingCoverage = true
+			state.outstandingFindings = gate.findings
+			state.selectedOutstandingIDs = gate.selectedOutstandingIDs
+		} else if response.action == types.ActionAnswer {
 			state.answering = true
 			// Carry the parked gate's outstanding set into the finalize round.
 			// The live path keeps it in locals across `continue rounds`, so an
@@ -1260,6 +1278,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// "answer" when it re-enters the step itself.
 	nextTrigger := "initial"
 	switch {
+	case state.completingCoverage:
+		nextTrigger = "coverage"
 	// answering is tested FIRST because the two are not exclusive: an answer
 	// round that inherits a fix_review gate's context carries fixing too, and
 	// labelling it "auto_fix" would persist a human's answer as a pipeline fix
@@ -1604,6 +1624,23 @@ rounds:
 				nextTrigger = "auto_fix"
 				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFixing), "", "", nil)
 				slog.Info("step fix requested, re-executing", "step", stepName)
+				continue rounds
+
+			case types.ActionCompleteCoverage:
+				phaseStart = time.Now()
+				writeLog("continuing static review to complete coverage without a fix or approval")
+				if err := markRunning(); err != nil {
+					return false, "", err
+				}
+				sctx.Fixing = false
+				sctx.AutoFixRound = false
+				sctx.FinalizingAnswers = false
+				sctx.SkipFixExecution = false
+				sctx.PreviousFindings = ""
+				sctx.DeferredFindings = ""
+				sctx.CarriedFindings = ""
+				BindUncertifiedPipelineRange(sctx)
+				nextTrigger = "coverage"
 				continue rounds
 
 			case types.ActionAnswer:

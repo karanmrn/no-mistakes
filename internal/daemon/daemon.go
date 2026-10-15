@@ -1479,7 +1479,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		dispositions, err := mgr.HandleRespondWithOverrides(p.RunID, p.Step, p.Action, p.FindingIDs, p.IgnoreFindingIDs, p.Instructions, p.AddedFindings, p.ApprovalReason)
+		dispositions, err := mgr.HandleRespondWithOverrides(p.RunID, p.Step, p.Action, p.FindingIDs, p.IgnoreFindingIDs, p.Instructions, p.AddedFindings, p.ApprovalReason, p.Coverage)
 		if err != nil {
 			// A refused fix response is the caller's input to fix, not a
 			// transport failure: the gate is still parked. Report it as a
@@ -1670,6 +1670,11 @@ func stepToInfo(d *db.DB, s *db.StepResult) ipc.StepResultInfo {
 		info.RoundCount = rounds.TotalRounds
 		info.FixRoundCount = rounds.FixRounds
 		info.PendingFixSource = rounds.PendingFixSource
+	}
+	if s.StepName == types.StepReview && (s.Status == types.StepStatusAwaitingApproval || s.Status == types.StepStatusFixReview) {
+		if rounds, err := d.GetRoundsByStep(s.ID); err == nil && len(rounds) != 0 {
+			info.LatestRoundID = rounds[len(rounds)-1].ID
+		}
 	}
 	return info
 }

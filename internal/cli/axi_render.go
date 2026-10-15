@@ -552,9 +552,13 @@ func gateFields(gate stepView) []toon.Field {
 // --run carrying runID, so a caller that selected the run by id keeps naming it.
 func gateFieldsForRun(gate stepView, runID string) []toon.Field {
 	respond := "no-mistakes axi respond" + runFlag(runID)
+	coverageHelp := "Run `" + respond + " --action complete-coverage` to perform another static review without fixing code or approving incomplete coverage"
 	help := []string{
 		"Run `" + respond + " --action approve` to accept this step and continue",
 		"Run `" + respond + " --action fix --findings <ids> [--ignore <ids>]` to have the pipeline fix the selected findings (do not edit files yourself); list every finding below in `--findings` or `--ignore`, unless an earlier round of this step already decided it, and a finding that round chose to fix cannot be declined by a later response",
+	}
+	if pipeline.CanContinueReviewCoverage(types.StepName(gate.Name), gate.FindingsJSON) {
+		help = append([]string{coverageHelp}, help...)
 	}
 	// A review parked in waiting-on-answers is not asking for a verdict: its
 	// reviewer asked questions and cannot finish without them. Approving or
