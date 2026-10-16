@@ -303,9 +303,9 @@ Finding IDs are trimmed before validation. Missing or repeated gate finding IDs 
 
 Every successful fix response echoes what it recorded in a `recorded:` object: `fixed` (the findings selected, including `--add-finding` items under their normalized IDs), `ignored` (the findings explicitly declined), and `kept` (the gate findings omitted that a previous response for this step had already decided). A finding the restored decision dispatched is reported under `fixed`, not also under `kept`. Approve, skip, and abort emit no disposition echo. They are not decision-free: a nonempty gate they resolve is recorded as a decline round, which is what later rounds read as `user_chose_to_ignore`. `--yes` resolution is unchanged: it selects every current finding.
 
-`--action complete-coverage` applies when Review has no findings and a valid stored record with incomplete coverage. A fresh reviewer examines only the missing files. The pipeline merges that coverage with the validated record. The action does not invoke a code fixer, approve incomplete coverage, or record an answer. Outstanding findings, finding overrides, and `--yes` are refused.
-
-The request binds to the observed head, step, and round. Coverage reuse also requires the same run, base, trusted configuration, and changed-file set. Older records without this provenance cannot use the action. The reviewer checks the stored record before and after its turn. A stale request, source changes, incomplete output, or new findings keep Review gated. Ignored evidence remains in place, and the remaining pipeline gates still apply.
+`--action complete-coverage` continues a Review gate under the [coverage continuation rules](/no-mistakes/reference/pipeline-steps/#coverage-continuation).
+It refuses `--yes`, `--findings`, `--ignore`, `--instructions`, `--add-finding`, and `--reason`.
+The CLI supplies the observed head, step result, and latest round binding automatically.
 
 For an explicitly authorized Test exception, use `no-mistakes axi respond --step test --action approve --reason "the operator's explanation"`.
 The reason is optional: approval without one remains effective, and a qualifying exception is reported with no operator reason supplied.

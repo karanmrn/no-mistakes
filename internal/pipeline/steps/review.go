@@ -643,7 +643,7 @@ func reviewCoverageCompletionSection(missing []string) string {
 }
 
 // completeCoverageGaps runs at most one focused review turn over exactly the
-// reviewable files the just-finished pass did not cover, and merges its
+// reviewable files the current or retained pass did not cover, and merges its
 // findings and coverage record into the round's. It runs only on a round that
 // would otherwise park SOLELY on a coverage gap (zero blocking findings), so
 // a healthy full-coverage review costs nothing extra and a round with

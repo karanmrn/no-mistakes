@@ -294,12 +294,6 @@ type WithdrawnFinding struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// Findings is the structured findings payload exchanged across pipeline, IPC, and TUI.
-//
-// Scenarios and Verdict are the test step's live-validation contract. Both are
-// omitempty and both decode as their zero values from every findings payload
-// written before the contract existed, so an older recorded run still parses
-// and simply renders no scenario table.
 // ReviewCoverageScope is pipeline-written provenance for retained coverage.
 // Agent output never supplies authority for this record.
 type ReviewCoverageScope struct {
@@ -314,6 +308,12 @@ type ReviewCoverageScope struct {
 	SourceRoundID    string   `json:"source_round_id,omitempty"`
 }
 
+// Findings is the structured findings payload exchanged across pipeline, IPC, and TUI.
+//
+// Scenarios and Verdict are the test step's live-validation contract. Both are
+// omitempty and both decode as their zero values from every findings payload
+// written before the contract existed, so an older recorded run still parses
+// and simply renders no scenario table.
 type Findings struct {
 	Items   []Finding `json:"findings"`
 	Summary string    `json:"summary"`
