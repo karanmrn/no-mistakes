@@ -88,19 +88,23 @@ func validCoverageRecordShape(findings types.Findings) bool {
 	if len(findings.Items) != 0 || scope == nil || scope.Version != 1 || scope.RunID == "" || scope.StepResultID == "" || scope.HeadSHA == "" || scope.RunBaseSHA == "" || scope.BaseSHA == "" || scope.TrustedConfigSHA == "" || len(scope.Paths) == 0 {
 		return false
 	}
+	// Compare by cleaned path, as Review does, so a clean partial round that
+	// recorded "./x" against a scope of "x" can still continue.
 	paths := make(map[string]bool, len(scope.Paths))
 	for _, name := range scope.Paths {
-		if name == "" || paths[name] {
+		normalized := normalizeCoveredPath(name)
+		if normalized == "" || paths[normalized] {
 			return false
 		}
-		paths[name] = true
+		paths[normalized] = true
 	}
 	reviewed := make(map[string]bool, len(findings.ReviewedPaths))
 	for _, name := range findings.ReviewedPaths {
-		if !paths[name] {
+		normalized := normalizeCoveredPath(name)
+		if normalized == "" || !paths[normalized] {
 			return false
 		}
-		reviewed[name] = true
+		reviewed[normalized] = true
 	}
 	if len(reviewed) == len(paths) {
 		return false

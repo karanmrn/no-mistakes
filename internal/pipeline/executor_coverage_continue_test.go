@@ -451,3 +451,28 @@ func TestExecutor_ConcurrentCoverageResponsesStartOnlyOneReview(t *testing.T) {
 		t.Fatalf("review calls = %d, want initial plus one continuation", calls)
 	}
 }
+
+func TestCanContinueReviewCoverage_ComparesCleanedPaths(t *testing.T) {
+	run := &db.Run{ID: "run-1", HeadSHA: "head", BaseSHA: "base"}
+	cases := []struct {
+		name       string
+		reviewed   []string
+		reviewable []string
+		want       bool
+	}{
+		{"dot-slash reviewed path matches scope", []string{"./feature.txt"}, []string{"feature.txt", "other.txt"}, true},
+		{"dot-slash scope path matches reviewed", []string{"feature.txt"}, []string{"./feature.txt", "other.txt"}, true},
+		{"cleaned reviewed paths that cover the scope are complete", []string{"./feature.txt", "dir/../other.txt"}, []string{"feature.txt", "other.txt"}, false},
+		{"scope paths that clean to the same file are refused", []string{}, []string{"feature.txt", "./feature.txt"}, false},
+		{"reviewed path outside the scope is refused", []string{"./elsewhere.txt"}, []string{"feature.txt", "other.txt"}, false},
+		{"reviewed path that cleans to nothing is refused", []string{"./"}, []string{"feature.txt", "other.txt"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := coverageFixtureFindings(t, run, "step-1", tc.reviewed, tc.reviewable)
+			if got := CanContinueReviewCoverage(types.StepReview, payload); got != tc.want {
+				t.Fatalf("CanContinueReviewCoverage = %v, want %v for %s", got, tc.want, payload)
+			}
+		})
+	}
+}
